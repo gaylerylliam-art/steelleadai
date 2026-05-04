@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Building2 } from "lucide-react";
-import { supabase } from "@/lib/supabase";
+import { isSupabaseConfigured, supabase } from "@/lib/supabase";
 
 type AuthPanelProps = {
   onAuthenticated?: () => void;
@@ -12,11 +12,24 @@ export function AuthPanel({ onAuthenticated }: AuthPanelProps) {
   const [message, setMessage] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.hash.replace(/^#/, "") || window.location.search);
+    const errorDescription = params.get("error_description");
+    if (errorDescription) {
+      setMessage(errorDescription.replace(/\+/g, " "));
+      window.history.replaceState({}, document.title, window.location.pathname);
+    }
+  }, []);
+
   async function handleGoogleLogin() {
     setMessage("");
 
-    if (!supabase) {
-      setMessage("Supabase is not configured. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY.");
+    if (!supabase || !isSupabaseConfigured) {
+      setMessage(
+        process.env.NODE_ENV === "development"
+          ? "Supabase is not configured. Add NEXT_PUBLIC_SUPABASE_URL and NEXT_PUBLIC_SUPABASE_ANON_KEY to .env.local, then restart the dev server."
+          : "Authentication is not configured for this deployment. Contact the app administrator."
+      );
       return;
     }
 
@@ -29,7 +42,7 @@ export function AuthPanel({ onAuthenticated }: AuthPanelProps) {
     const { error } = await supabase.auth.signInWithOAuth({
       provider,
       options: {
-        redirectTo: typeof window === "undefined" ? undefined : `${window.location.origin}/`
+        redirectTo: "https://steelleadai.vercel.app/oauth/consent"
       }
     });
 

@@ -52,7 +52,7 @@ export function scoreLead(lead: LeadInput | Lead): number {
 }
 
 export function scoreBand(score: number) {
-  if (score >= 75) return { label: "Hot", color: "bg-red-100 text-red-700" };
-  if (score >= 50) return { label: "Warm", color: "bg-amber-100 text-amber-700" };
-  return { label: "Nurture", color: "bg-slate-100 text-slate-700" };
+  if (score >= 80) return { label: "Hot", color: "bg-red-100 text-red-700" };
+  if (score >= 50) return { label: "Warm", color: "bg-orange-100 text-orange-700" };
+  return { label: "Cold", color: "bg-slate-100 text-slate-700" };
 }

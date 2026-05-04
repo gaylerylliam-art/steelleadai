@@ -4,8 +4,8 @@ import { ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useState } from 
 import type { Session } from "@supabase/supabase-js";
 import Papa from "papaparse";
 import { jsPDF } from "jspdf";
+import autoTable from "jspdf-autotable";
 import {
-  AlertCircle,
   BarChart3,
   Bell,
   Bot,
@@ -79,6 +79,7 @@ const defaultFilters: Filters = {
 type ImportHistoryItem = {
   id: string;
   timestamp: string;
+  totalRows: number;
   imported: number;
   skipped: number;
   duplicates: number;
@@ -104,6 +105,7 @@ export default function HomePage() {
   const [dataMessage, setDataMessage] = useState("");
   const [toast, setToast] = useState("");
   const [importHistory, setImportHistory] = useState<ImportHistoryItem[]>([]);
+  const [importHistoryOpen, setImportHistoryOpen] = useState(false);
   const [messagesSentToday, setMessagesSentToday] = useState(0);
   const [lastOutreach, setLastOutreach] = useState<{ company: string; time: Date } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -114,6 +116,7 @@ export default function HomePage() {
   const [activityLeadId, setActivityLeadId] = useState("");
   const [activityNote, setActivityNote] = useState("");
   const [activityLogs, setActivityLogs] = useState<Record<string, ActivityItem[]>>({});
+  const [duplicateCheckTouched, setDuplicateCheckTouched] = useState({ companyName: false, email: false });
 
   useEffect(() => {
     if (!supabase) {
@@ -183,7 +186,7 @@ export default function HomePage() {
 
   const selectedLead = leads.find((lead) => lead.id === selectedLeadId) || filteredLeads[0] || leads[0] || null;
   const activeActivityLead = leads.find((lead) => lead.id === activityLeadId) || null;
-  const duplicateWarning = getDuplicateWarning(form, leads);
+  const duplicateLead = getDuplicateLead(form, leads, duplicateCheckTouched);
 
   const metrics = useMemo(() => {
     return {
@@ -196,7 +199,7 @@ export default function HomePage() {
 
   async function addLead(event: FormEvent) {
     event.preventDefault();
-    if (!supabase || !session?.user.id || duplicateWarning) return;
+    if (!supabase || !session?.user.id || duplicateLead) return;
     const score = scoreLead(form);
     const { data, error } = await supabase
       .from("leads")
@@ -214,6 +217,7 @@ export default function HomePage() {
     setSelectedLeadId(nextLead.id);
     addActivity(nextLead.id, "Lead created");
     setForm(blankLead);
+    setDuplicateCheckTouched({ companyName: false, email: false });
     setMobileLeadModalOpen(false);
   }
 
@@ -306,11 +310,13 @@ export default function HomePage() {
         let duplicates = 0;
         const seen = new Set(leads.map((lead) => `${lead.companyName.toLowerCase()}|${lead.email.toLowerCase()}`));
 
-        const importedInputs = result.data.flatMap((row, index) => {
-          const companyName = row.companyName || row.company || `Imported Lead ${index + 1}`;
+        const totalRows = result.data.length;
+        const importedInputs = result.data.flatMap((row) => {
+          const companyName = row.companyName || row.company || "";
+          const projectType = row.projectType || "";
           const email = row.email || "";
           const key = `${companyName.toLowerCase()}|${email.toLowerCase()}`;
-          if (!companyName.trim()) {
+          if (!companyName.trim() || !projectType.trim()) {
             skipped += 1;
             return [];
           }
@@ -333,7 +339,7 @@ export default function HomePage() {
             phone: row.phone || row.whatsapp || "",
             emirate: emirates.includes(row.emirate as never) ? (row.emirate as Lead["emirate"]) : "Dubai",
             industry: industries.includes(row.industry as never) ? (row.industry as Lead["industry"]) : "Construction",
-            projectType: row.projectType || "Structural steel requirement",
+            projectType,
             projectSize: projectSizes.includes(row.projectSize as never) ? (row.projectSize as Lead["projectSize"]) : "Medium",
             productsRequired: productsRequired.length ? productsRequired : ["Universal beams"],
             leadSource: row.leadSource || "CSV import",
@@ -350,9 +356,10 @@ export default function HomePage() {
         if (!rows.length) {
           showToast(`CSV import: 0 imported, ${skipped} skipped, ${duplicates} duplicates ignored.`);
           setImportHistory((current) => [
-            { id: `${Date.now()}`, timestamp: new Date().toISOString(), imported: 0, skipped, duplicates },
+            { id: `${Date.now()}`, timestamp: new Date().toISOString(), totalRows, imported: 0, skipped, duplicates },
             ...current
           ].slice(0, 5));
+          setImportHistoryOpen(true);
           return;
         }
 
@@ -370,9 +377,10 @@ export default function HomePage() {
             imported.forEach((lead) => addActivity(lead.id, "Imported from CSV"));
             showToast(`CSV import: ${imported.length} imported, ${skipped} skipped, ${duplicates} duplicates ignored.`);
             setImportHistory((current) => [
-              { id: `${Date.now()}`, timestamp: new Date().toISOString(), imported: imported.length, skipped, duplicates },
+              { id: `${Date.now()}`, timestamp: new Date().toISOString(), totalRows, imported: imported.length, skipped, duplicates },
               ...current
             ].slice(0, 5));
+            setImportHistoryOpen(true);
           });
       }
     });
@@ -402,46 +410,43 @@ export default function HomePage() {
   function exportPdf() {
     const doc = new jsPDF({ orientation: "landscape" });
     const today = new Date().toLocaleDateString();
+    const activeFilters = [
+      filters.search ? `Search: ${filters.search}` : "",
+      filters.emirate ? `Emirate: ${filters.emirate}` : "",
+      filters.industry ? `Industry: ${filters.industry}` : "",
+      filters.status ? `Status: ${filters.status}` : "",
+      filters.product ? `Product: ${filters.product}` : "",
+      filters.minScore ? `Min score: ${filters.minScore}` : ""
+    ].filter(Boolean);
+
     doc.setFillColor(31, 122, 140);
     doc.rect(0, 0, 297, 22, "F");
     doc.setTextColor(255, 255, 255);
     doc.setFontSize(18);
     doc.text("SteelLead AI", 12, 14);
     doc.setFontSize(10);
-    doc.text(`Filtered Leads Export - ${today}`, 225, 14);
+    doc.text(`Filtered Leads Export - ${today}`, 220, 14);
     doc.setTextColor(23, 32, 51);
+    doc.setFontSize(11);
+    doc.text("Company: SteelLead AI", 12, 31);
     doc.setFontSize(9);
+    doc.text(`Active filters: ${activeFilters.length ? activeFilters.join(" | ") : "None"}`, 12, 38);
 
-    const headers = ["Company", "Contact", "Emirate", "Industry", "Products", "Score", "Status"];
-    const widths = [52, 40, 28, 38, 62, 18, 32];
-    let x = 12;
-    let y = 34;
-    headers.forEach((header, index) => {
-      doc.setFont("helvetica", "bold");
-      doc.text(header, x, y);
-      x += widths[index];
-    });
-    doc.setFont("helvetica", "normal");
-
-    filteredLeads.forEach((lead) => {
-      y += 9;
-      if (y > 190) {
-        doc.addPage();
-        y = 20;
-      }
-      x = 12;
-      [
+    autoTable(doc, {
+      startY: 46,
+      head: [["Company", "Contact", "Emirate", "Products", "Score", "Status", "Follow-up date"]],
+      body: filteredLeads.map((lead) => [
         lead.companyName,
-        lead.contactPerson,
+        lead.contactPerson || "-",
         lead.emirate,
-        lead.industry,
         lead.productsRequired.join(", "),
-        String(lead.score),
-        lead.status
-      ].forEach((value, index) => {
-        doc.text(doc.splitTextToSize(value || "-", widths[index] - 3), x, y);
-        x += widths[index];
-      });
+        `${lead.score} ${getScoreStyle(lead.score).label}`,
+        lead.status,
+        lead.nextFollowUp || "-"
+      ]),
+      styles: { fontSize: 8, cellPadding: 2 },
+      headStyles: { fillColor: [31, 122, 140], textColor: [255, 255, 255] },
+      alternateRowStyles: { fillColor: [245, 247, 250] }
     });
 
     doc.save(`steellead-ai-leads-${new Date().toISOString().slice(0, 10)}.pdf`);
@@ -450,6 +455,11 @@ export default function HomePage() {
   function showToast(message: string) {
     setToast(message);
     window.setTimeout(() => setToast(""), 5000);
+  }
+
+  function clearFilters() {
+    setFilters(defaultFilters);
+    setSelectedRows([]);
   }
 
   function addActivity(leadId: string, text: string) {
@@ -466,6 +476,11 @@ export default function HomePage() {
     if (!activityLeadId || !activityNote.trim()) return;
     addActivity(activityLeadId, activityNote.trim());
     setActivityNote("");
+  }
+
+  function viewExistingLead(leadId: string) {
+    setSelectedLeadId(leadId);
+    setActivityLeadId(leadId);
   }
 
   async function logout() {
@@ -550,16 +565,39 @@ export default function HomePage() {
                   <Filter size={20} /> Search and filters
                 </h2>
                 <div className="flex flex-wrap gap-2">
-                  <label className="focus-ring inline-flex cursor-pointer items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium">
-                    <Upload size={17} />
-                    CSV import
-                    <input className="hidden" type="file" accept=".csv" onChange={importCsv} />
-                  </label>
+                  <div>
+                    <label className="focus-ring inline-flex cursor-pointer items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium">
+                      <Upload size={17} />
+                      CSV import
+                      <input className="hidden" type="file" accept=".csv" onChange={importCsv} />
+                    </label>
+                    {importHistory.length ? (
+                      <div className="mt-2">
+                        <button className="text-xs font-semibold text-alloy" onClick={() => setImportHistoryOpen((open) => !open)}>
+                          {importHistoryOpen ? "Hide" : "Show"} Import History
+                        </button>
+                      </div>
+                    ) : null}
+                  </div>
                   <button className="focus-ring inline-flex items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium" onClick={exportPdf}>
                     <FileText size={17} /> Export PDF
                   </button>
                 </div>
               </div>
+              {importHistoryOpen && importHistory.length ? (
+                <div className="mt-4 rounded-md border border-slate-200 bg-slate-50 p-3">
+                  <h3 className="text-sm font-semibold">Import History</h3>
+                  <div className="mt-3 grid gap-2 md:grid-cols-5">
+                    {importHistory.map((item) => (
+                      <div key={item.id} className="rounded-md bg-white p-3 text-sm">
+                        <div className="font-semibold">{item.imported} imported</div>
+                        <div className="mt-1 text-xs text-steel">{new Date(item.timestamp).toLocaleString()}</div>
+                        <div className="mt-2 text-xs text-steel">{item.totalRows} total | {item.skipped} skipped | {item.duplicates} duplicates</div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               <div className="mt-4 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
                 <TextInput icon={<Search size={16} />} placeholder="Search leads" value={filters.search} onChange={(value) => setFilters({ ...filters, search: value })} />
                 <Select value={filters.emirate} onChange={(value) => setFilters({ ...filters, emirate: value })} options={["", ...emirates]} label="All emirates" />
@@ -579,21 +617,6 @@ export default function HomePage() {
               <Breakdown title="Leads by industry" labels={industries} leads={leads} field="industry" />
             </div>
           </section>
-
-          {importHistory.length ? (
-            <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-panel">
-              <h2 className="text-lg font-semibold">Import History</h2>
-              <div className="mt-3 grid gap-2 md:grid-cols-5">
-                {importHistory.map((item) => (
-                  <div key={item.id} className="rounded-md border border-slate-200 p-3 text-sm">
-                    <div className="font-semibold">{item.imported} rows</div>
-                    <div className="mt-1 text-xs text-steel">{new Date(item.timestamp).toLocaleString()}</div>
-                    <div className="mt-2 text-xs text-steel">{item.skipped} skipped | {item.duplicates} duplicates</div>
-                  </div>
-                ))}
-              </div>
-            </section>
-          ) : null}
 
           <BulkActionBar
             count={selectedRows.length}
@@ -627,12 +650,14 @@ export default function HomePage() {
                       <th className="px-4 py-3">Emirate</th>
                       <th className="px-4 py-3">Products</th>
                       <th className="px-4 py-3">
-                        <span className="group relative inline-flex items-center gap-1">
+                        <span className="inline-flex items-center gap-1">
                           Score
-                          <HelpCircle size={14} />
-                          <span className="absolute left-0 top-6 z-20 hidden w-72 rounded-md bg-ink p-3 normal-case text-white shadow-panel group-hover:block">
-                            80 to 100 is Hot shown in red badge, 50 to 79 is Warm shown in orange badge, below 50 is Cold shown in grey badge.
-                          </span>
+                          <button type="button" className="group relative rounded-full p-0.5 text-steel hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-alloy/20" aria-label="Score guide">
+                            <HelpCircle size={14} />
+                            <span className="pointer-events-none absolute left-1/2 top-6 z-20 hidden w-72 -translate-x-1/2 rounded-md bg-ink p-3 text-left text-xs normal-case leading-relaxed text-white shadow-panel group-hover:block group-focus-visible:block">
+                              80 to 100 equals Hot shown as red badge, 50 to 79 equals Warm shown as orange badge, below 50 equals Cold shown as grey badge.
+                            </span>
+                          </button>
                         </span>
                       </th>
                       <th className="px-4 py-3">Status</th>
@@ -645,10 +670,10 @@ export default function HomePage() {
                       <tr>
                         <td className="px-4 py-12" colSpan={9}>
                           <div className="mx-auto max-w-md text-center">
-                            <AlertCircle className="mx-auto text-steel" size={36} />
+                            <Search className="mx-auto text-steel" size={40} />
                             <h3 className="mt-3 text-lg font-semibold">No leads match your filters</h3>
-                            <p className="mt-1 text-sm text-steel">Try adjusting the search or filters above.</p>
-                            <button className="focus-ring mt-4 rounded-md bg-alloy px-4 py-2 font-semibold text-white" onClick={() => setFilters(defaultFilters)}>
+                            <p className="mt-1 text-sm text-steel">No leads match your filters, try adjusting the search or filters above.</p>
+                            <button className="focus-ring mt-4 rounded-md bg-alloy px-4 py-2 font-semibold text-white" onClick={clearFilters}>
                               Clear Filters
                             </button>
                           </div>
@@ -656,7 +681,6 @@ export default function HomePage() {
                       </tr>
                     ) : null}
                     {filteredLeads.map((lead) => {
-                      const scoreStyle = getScoreStyle(lead.score);
                       return (
                         <tr key={lead.id} onClick={() => setSelectedLeadId(lead.id)} className="cursor-pointer border-t border-slate-100 hover:bg-slate-50">
                           <td className="px-4 py-3" onClick={(event) => event.stopPropagation()}>
@@ -676,27 +700,38 @@ export default function HomePage() {
                           </td>
                           <td className="px-4 py-3">
                             <div>{lead.contactPerson}</div>
-                            <div className="text-xs text-steel">{lead.email}</div>
+                            <div className="mt-1 flex items-center gap-2 text-xs text-steel">
+                              <span>{lead.email}</span>
+                              <button
+                                className="rounded-md border border-slate-200 p-1 text-green-600 hover:bg-green-50 disabled:cursor-not-allowed disabled:opacity-40"
+                                disabled={!lead.phone}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  openWhatsApp(lead.phone);
+                                }}
+                                title={lead.phone ? "Open WhatsApp" : "No phone number on record"}
+                                type="button"
+                              >
+                                <MessageCircle size={14} />
+                              </button>
+                            </div>
                           </td>
                           <td className="px-4 py-3">{lead.emirate}</td>
                           <td className="px-4 py-3">{lead.productsRequired.join(", ")}</td>
                           <td className="px-4 py-3">
-                            <span className={`rounded-full px-2 py-1 text-xs font-semibold text-white ${scoreStyle.bg}`}>{lead.score} {scoreStyle.label}</span>
+                            <ScoreBadge score={lead.score} />
                           </td>
                           <td className="px-4 py-3" onClick={(event) => event.stopPropagation()}>
                             <select className="rounded-md border border-slate-200 px-2 py-1 focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" value={lead.status} onChange={(event) => updateStatus(lead.id, event.target.value as Lead["status"])}>
                               {leadStatuses.map((status) => <option key={status}>{status}</option>)}
                             </select>
                           </td>
-                          <td className="px-4 py-3" onClick={(event) => event.stopPropagation()}>
+                          <td className={`px-4 py-3 ${getFollowUpUrgency(lead.nextFollowUp).cellClass}`} title={getFollowUpUrgency(lead.nextFollowUp).tooltip} onClick={(event) => event.stopPropagation()}>
                             <FollowUpInput lead={lead} onChange={updateFollowUp} />
                           </td>
                           <td className="px-4 py-3" onClick={(event) => event.stopPropagation()}>
                             <div className="flex items-center gap-2">
-                              <button className="rounded-md border border-slate-200 p-2 text-green-600 hover:bg-green-50" onClick={() => openWhatsApp(lead.phone)} title="Open WhatsApp">
-                                <MessageCircle size={16} />
-                              </button>
-                              <button className="rounded-md border border-slate-200 p-2 text-alloy hover:bg-slate-50" onClick={() => setActivityLeadId(lead.id)} title="Activity log">
+                              <button className="rounded-md border border-slate-200 p-2 text-alloy hover:bg-slate-50" onClick={() => setActivityLeadId(lead.id)} title="View activity log">
                                 <Clock size={16} />
                               </button>
                             </div>
@@ -716,7 +751,10 @@ export default function HomePage() {
                 onSubmit={addLead}
                 onClear={() => setForm(blankLead)}
                 onToggleProduct={toggleProduct}
-                duplicateWarning={duplicateWarning}
+                duplicateLead={duplicateLead}
+                onDuplicateBlur={(field) => setDuplicateCheckTouched((current) => ({ ...current, [field]: true }))}
+                onViewExisting={viewExistingLead}
+                onResetDuplicateCheck={() => setDuplicateCheckTouched({ companyName: false, email: false })}
               />
             </div>
           </section>
@@ -752,7 +790,7 @@ export default function HomePage() {
                     {leads.filter((lead) => lead.status === status).slice(0, 4).map((lead) => (
                       <button key={lead.id} onClick={() => setSelectedLeadId(lead.id)} className="rounded-md bg-white p-2 text-left text-xs shadow-sm">
                         <span className="font-semibold">{lead.companyName}</span>
-                        <span className="mt-1 block text-steel">{lead.score}/100</span>
+                        <ScoreBadge score={lead.score} className="mt-2" />
                       </button>
                     ))}
                   </div>
@@ -797,7 +835,10 @@ export default function HomePage() {
             onSubmit={addLead}
             onClear={() => setForm(blankLead)}
             onToggleProduct={toggleProduct}
-            duplicateWarning={duplicateWarning}
+            duplicateLead={duplicateLead}
+            onDuplicateBlur={(field) => setDuplicateCheckTouched((current) => ({ ...current, [field]: true }))}
+            onViewExisting={viewExistingLead}
+            onResetDuplicateCheck={() => setDuplicateCheckTouched({ companyName: false, email: false })}
           />
         </div>
       ) : null}
@@ -876,15 +917,16 @@ function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
 
 function Metric({ label, value, trend, color, icon }: { label: string; value: number; trend: string; color: "teal" | "amber" | "purple" | "green"; icon: ReactNode }) {
   const styles = {
-    teal: "text-teal-700 bg-teal-500",
-    amber: "text-amber-700 bg-amber-500",
-    purple: "text-purple-700 bg-purple-500",
-    green: "text-green-700 bg-green-500"
+    teal: "text-teal-700 bg-teal-500 border-l-teal-500",
+    amber: "text-amber-700 bg-amber-500 border-l-amber-500",
+    purple: "text-purple-700 bg-purple-500 border-l-purple-500",
+    green: "text-green-700 bg-green-500 border-l-green-500"
   }[color];
-  const [textClass, barClass] = styles.split(" ");
+  const [textClass, barClass, borderClass] = styles.split(" ");
+  const progress = Math.min(100, Math.max(value > 0 ? 12 : 0, value * 10));
 
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-panel">
+    <div className={`rounded-lg border border-l-4 border-slate-200 bg-white p-4 shadow-panel ${borderClass}`}>
       <div className="flex items-center justify-between text-steel">
         <span className="text-sm font-medium">{label}</span>
         {icon}
@@ -892,7 +934,7 @@ function Metric({ label, value, trend, color, icon }: { label: string; value: nu
       <div className="mt-3 text-3xl font-semibold">{value}</div>
       <div className={`mt-1 text-xs font-semibold ${textClass}`}>{trend}</div>
       <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100">
-        <div className={`h-full rounded-full ${barClass}`} style={{ width: `${Math.min(100, Math.max(18, value * 10))}%` }} />
+        <div className={`h-full rounded-full ${barClass}`} style={{ width: `${progress}%` }} />
       </div>
     </div>
   );
@@ -903,9 +945,9 @@ function OutreachSummary({ sentToday, lastOutreach }: { sentToday: number; lastO
     <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-panel">
       <h3 className="flex items-center gap-2 text-sm font-semibold"><Bot size={17} /> AI Outreach Summary</h3>
       <div className="mt-3 text-3xl font-semibold">{sentToday}</div>
-      <p className="text-xs font-semibold text-teal-700">messages sent today</p>
+      <p className="text-xs font-semibold text-teal-700">outreach messages sent today</p>
       <p className="mt-3 text-sm text-steel">
-        {lastOutreach ? `${lastOutreach.company} - ${timeAgo(lastOutreach.time)}` : "No outreach activity yet"}
+        {lastOutreach ? `Last outreach: ${lastOutreach.company} - ${timeAgo(lastOutreach.time)}` : "Last outreach: no activity yet"}
       </p>
       <a className="focus-ring mt-4 inline-flex rounded-md bg-alloy px-3 py-2 text-sm font-semibold text-white" href="#ai-outreach">
         Go to AI Outreach
@@ -920,24 +962,41 @@ function LeadForm({
   onSubmit,
   onClear,
   onToggleProduct,
-  duplicateWarning
+  duplicateLead,
+  onDuplicateBlur,
+  onViewExisting,
+  onResetDuplicateCheck
 }: {
   form: LeadInput;
   setForm: (form: LeadInput) => void;
   onSubmit: (event: FormEvent) => void;
   onClear: () => void;
   onToggleProduct: (product: (typeof products)[number]) => void;
-  duplicateWarning: string;
+  duplicateLead: Lead | null;
+  onDuplicateBlur: (field: "companyName" | "email") => void;
+  onViewExisting: (leadId: string) => void;
+  onResetDuplicateCheck: () => void;
 }) {
+  function clearForm() {
+    onClear();
+    onResetDuplicateCheck();
+  }
+
   return (
-    <form onSubmit={onSubmit} className="rounded-lg border border-slate-200 bg-white p-4 shadow-panel">
+    <form onSubmit={onSubmit} className="rounded-lg border border-slate-200 bg-white shadow-panel">
+      <div className="p-4 pb-0">
       <h2 className="flex items-center gap-2 text-xl font-semibold"><ListPlus size={20} /> Add lead</h2>
-      {duplicateWarning ? (
-        <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">{duplicateWarning}</div>
+      {duplicateLead ? (
+        <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+          A lead with this company name already exists.
+          <button type="button" className="ml-2 font-semibold text-alloy underline" onClick={() => onViewExisting(duplicateLead.id)}>
+            View existing lead
+          </button>
+        </div>
       ) : null}
       <div className="mt-5 grid gap-5">
         <FormSection title="Company Info">
-          <Field label="Company name" required value={form.companyName} onChange={(value) => setForm({ ...form, companyName: value })} />
+          <Field label="Company name" required value={form.companyName} onBlur={() => onDuplicateBlur("companyName")} onChange={(value) => setForm({ ...form, companyName: value })} />
           <Field label="Project type" required value={form.projectType} onChange={(value) => setForm({ ...form, projectType: value })} />
           <Select value={form.industry} onChange={(value) => setForm({ ...form, industry: value as Lead["industry"] })} options={industries} label="Industry" required />
         </FormSection>
@@ -945,7 +1004,7 @@ function LeadForm({
         <FormSection title="Contact Info">
           <Field label="Contact person" value={form.contactPerson} onChange={(value) => setForm({ ...form, contactPerson: value })} />
           <Field label="Job title" value={form.jobTitle} onChange={(value) => setForm({ ...form, jobTitle: value })} />
-          <Field label="Email" type="email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} />
+          <Field label="Email" type="email" value={form.email} onBlur={() => onDuplicateBlur("email")} onChange={(value) => setForm({ ...form, email: value })} />
           <Field label="Phone / WhatsApp" value={form.phone} onChange={(value) => setForm({ ...form, phone: value })} />
         </FormSection>
 
@@ -981,9 +1040,10 @@ function LeadForm({
           </label>
         </FormSection>
       </div>
-      <div className="mt-5 flex gap-3">
-        <button className="focus-ring flex-1 rounded-md bg-ink px-4 py-3 font-semibold text-white" disabled={Boolean(duplicateWarning)}>Save Lead</button>
-        <button type="button" className="focus-ring rounded-md border border-slate-200 px-4 py-3 font-semibold text-ink" onClick={onClear}>Clear</button>
+      </div>
+      <div className="sticky bottom-0 mt-5 flex gap-3 border-t border-slate-200 bg-white p-4">
+        <button className="focus-ring flex-1 rounded-md bg-alloy px-4 py-3 font-semibold text-white disabled:cursor-not-allowed disabled:opacity-60" disabled={Boolean(duplicateLead)}>Save Lead</button>
+        <button type="button" className="focus-ring rounded-md border border-slate-200 bg-slate-50 px-4 py-3 font-semibold text-ink" onClick={clearForm}>Clear</button>
       </div>
     </form>
   );
@@ -998,11 +1058,11 @@ function FormSection({ title, children }: { title: string; children: ReactNode }
   );
 }
 
-function Field({ label, value, onChange, type = "text", required = false }: { label: string; value: string; onChange: (value: string) => void; type?: string; required?: boolean }) {
+function Field({ label, value, onChange, onBlur, type = "text", required = false }: { label: string; value: string; onChange: (value: string) => void; onBlur?: () => void; type?: string; required?: boolean }) {
   return (
     <label className="text-xs font-medium text-steel">
       {label} {required ? <span className="text-red-500">*</span> : null}
-      <input required={required} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-ink focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" type={type} value={value} onChange={(event) => onChange(event.target.value)} />
+      <input required={required} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-ink focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" type={type} value={value} onBlur={onBlur} onChange={(event) => onChange(event.target.value)} />
     </label>
   );
 }
@@ -1060,16 +1120,17 @@ function Breakdown({
   field: "emirate" | "industry";
 }) {
   const max = Math.max(1, ...labels.map((label) => leads.filter((lead) => lead[field] === label).length));
+  const isIndustry = field === "industry";
   return (
-    <div className="max-h-80 overflow-y-auto rounded-lg border border-slate-200 bg-white p-4 shadow-panel">
+    <div className={`h-auto rounded-lg border border-slate-200 bg-white p-4 shadow-panel ${isIndustry ? "max-h-none overflow-auto" : "overflow-auto"}`}>
       <h3 className="text-sm font-semibold">{title}</h3>
-      <div className="mt-3 grid gap-2">
+      <div className="mt-3 grid min-w-0 gap-2">
         {labels.map((label) => {
           const count = leads.filter((lead) => lead[field] === label).length;
           return (
             <div key={label}>
-              <div className="flex justify-between text-xs text-steel">
-                <span>{label}</span>
+              <div className="flex min-w-0 justify-between gap-3 text-xs text-steel">
+                <span className="min-w-0 whitespace-normal">{label}</span>
                 <span>{count}</span>
               </div>
               <div className="mt-1 h-2 overflow-hidden rounded-full bg-slate-100">
@@ -1087,7 +1148,7 @@ function BulkActionBar({ count, status, onStatusChange, onApply, onDelete }: { c
   if (!count) return null;
   return (
     <div className="sticky top-20 z-20 flex flex-col gap-3 rounded-lg border border-slate-200 bg-white p-3 shadow-panel md:flex-row md:items-center md:justify-between">
-      <span className="text-sm font-semibold">{count} selected</span>
+      <span className="text-sm font-semibold">Update status for selected leads ({count})</span>
       <div className="flex flex-wrap gap-2">
         <select className="rounded-md border border-slate-200 px-3 py-2 text-sm" value={status} onChange={(event) => onStatusChange(event.target.value)}>
           {leadStatuses.map((item) => <option key={item}>{item}</option>)}
@@ -1105,7 +1166,7 @@ function FollowUpInput({ lead, onChange }: { lead: Lead; onChange: (id: string, 
   const urgency = getFollowUpUrgency(lead.nextFollowUp);
   return (
     <input
-      className={`rounded-md border border-slate-200 px-2 py-1 ${urgency.className}`}
+      className={`rounded-md border border-slate-200 bg-transparent px-2 py-1 ${urgency.inputClass}`}
       title={urgency.tooltip}
       type="date"
       value={lead.nextFollowUp}
@@ -1120,28 +1181,36 @@ function getScoreStyle(score: number) {
   return { label: "Cold", bg: "bg-[#9CA3AF]" };
 }
 
+function ScoreBadge({ score, className = "" }: { score: number; className?: string }) {
+  const scoreStyle = getScoreStyle(score);
+  return (
+    <span className={`inline-flex w-fit rounded-full px-2 py-1 text-xs font-semibold text-white ${scoreStyle.bg} ${className}`}>
+      {score} {scoreStyle.label}
+    </span>
+  );
+}
+
 function getFollowUpUrgency(date: string) {
-  if (!date) return { className: "bg-white", tooltip: "No follow-up date set" };
+  if (!date) return { cellClass: "bg-white", inputClass: "bg-white", tooltip: "No follow-up date set" };
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const target = new Date(`${date}T00:00:00`);
   const days = Math.round((target.getTime() - today.getTime()) / 86400000);
-  if (days < 0) return { className: "bg-red-600 text-white", tooltip: `${Math.abs(days)} day(s) overdue` };
-  if (days === 0) return { className: "bg-amber-400 text-ink", tooltip: "Due today" };
-  if (days <= 3) return { className: "bg-orange-100 text-orange-800", tooltip: `${days} day(s) remaining` };
-  return { className: "bg-white", tooltip: `${days} day(s) remaining` };
+  if (days < 0) return { cellClass: "bg-red-600 text-white", inputClass: "border-white text-white", tooltip: `${Math.abs(days)} day(s) overdue` };
+  if (days === 0) return { cellClass: "bg-amber-400 text-ink", inputClass: "border-amber-600", tooltip: "Due today" };
+  if (days <= 3) return { cellClass: "bg-orange-100 text-orange-800", inputClass: "border-orange-200", tooltip: `${days} day(s) remaining` };
+  return { cellClass: "bg-white", inputClass: "bg-white", tooltip: `${days} day(s) remaining` };
 }
 
-function getDuplicateWarning(form: LeadInput, leads: Lead[]) {
+function getDuplicateLead(form: LeadInput, leads: Lead[], touched: { companyName: boolean; email: boolean }) {
   const company = form.companyName.trim().toLowerCase();
   const email = form.email.trim().toLowerCase();
-  if (!company && !email) return "";
-  const duplicate = leads.find((lead) => {
-    const sameCompany = company && lead.companyName.trim().toLowerCase() === company;
-    const sameEmail = email && lead.email.trim().toLowerCase() === email;
+  if ((!touched.companyName || !company) && (!touched.email || !email)) return null;
+  return leads.find((lead) => {
+    const sameCompany = touched.companyName && company && lead.companyName.trim().toLowerCase() === company;
+    const sameEmail = touched.email && email && lead.email.trim().toLowerCase() === email;
     return sameCompany || sameEmail;
-  });
-  return duplicate ? `Possible duplicate detected: ${duplicate.companyName} already exists.` : "";
+  }) || null;
 }
 
 function openWhatsApp(phone: string) {

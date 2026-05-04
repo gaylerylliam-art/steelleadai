@@ -40,6 +40,7 @@ npm install
 ```bash
 NEXT_PUBLIC_SUPABASE_URL=your-supabase-url
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your-supabase-anon-key
+NEXT_PUBLIC_SITE_URL=http://localhost:3000
 OPENAI_API_KEY=your-openai-api-key
 OPENAI_MODEL=gpt-4o-mini
 ```
@@ -77,6 +78,7 @@ Set these in Vercel under Project Settings -> Environment Variables:
 ```bash
 NEXT_PUBLIC_SUPABASE_URL=your-supabase-project-url
 NEXT_PUBLIC_SUPABASE_ANON_KEY=your-supabase-anon-key
+NEXT_PUBLIC_SITE_URL=https://your-vercel-app.vercel.app
 OPENAI_API_KEY=your-openai-api-key
 OPENAI_MODEL=gpt-4o-mini
 ```
@@ -87,6 +89,39 @@ After deployment, update Supabase Authentication URL settings:
 - Redirect URLs: include the same production URL and any preview URLs you want to support
 
 For Google login, also add the Supabase Google callback URL shown in Supabase Auth provider settings to your Google Cloud OAuth client authorized redirect URIs.
+
+## Google Login Checklist
+
+If Google login shows `Unsupported provider: provider is not enabled`, the app is reaching Supabase but the Google provider is not enabled/configured in the Supabase project connected by `NEXT_PUBLIC_SUPABASE_URL`.
+
+Supabase dashboard:
+
+- Go to Authentication -> Providers -> Google.
+- Turn Google provider on.
+- Paste the Google OAuth Web Client ID.
+- Paste the Google OAuth Web Client Secret.
+- Save the provider.
+- Go to Authentication -> URL Configuration.
+- Site URL local: `http://localhost:3000`
+- Site URL production: `https://your-vercel-app.vercel.app`
+- Redirect URLs: add `http://localhost:3000`, `http://localhost:3000/`, `https://your-vercel-app.vercel.app`, and `https://your-vercel-app.vercel.app/`.
+- For Vercel preview deploys, also add `https://*.vercel.app/**` or the exact preview URLs you use.
+
+Google Cloud dashboard:
+
+- Go to Google Auth Platform -> Clients.
+- Create or edit an OAuth Client ID.
+- Application type: Web application.
+- Authorized JavaScript origins: add `http://localhost:3000` and `https://your-vercel-app.vercel.app`.
+- Authorized redirect URIs: add the Supabase callback URL from Supabase Authentication -> Providers -> Google. It should look like `https://YOUR_PROJECT_ID.supabase.co/auth/v1/callback`.
+- Make sure the OAuth consent screen has scopes `openid`, user email, and user profile.
+
+Vercel:
+
+- `NEXT_PUBLIC_SUPABASE_URL` must be the same Supabase project where Google provider is enabled.
+- `NEXT_PUBLIC_SUPABASE_ANON_KEY` must be the anon public key from that same project.
+- `NEXT_PUBLIC_SITE_URL` should be your production app URL with `https://`.
+- Redeploy after changing environment variables.
 
 ## CSV Import Format
 
