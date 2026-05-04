@@ -1,24 +1,36 @@
 "use client";
 
 import { ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
+import type { Session } from "@supabase/supabase-js";
 import Papa from "papaparse";
+import { jsPDF } from "jspdf";
 import {
+  AlertCircle,
   BarChart3,
   Bell,
   Bot,
   Building2,
   CalendarClock,
+  ChevronDown,
+  Clock,
+  FileText,
   Filter,
   Flame,
+  HelpCircle,
   LayoutDashboard,
   ListPlus,
-  LogOut,
+  Menu,
+  MessageCircle,
+  Plus,
   Search,
   Send,
+  Settings,
+  Trash2,
   Upload,
-  Users
+  UserCircle,
+  Users,
+  X
 } from "lucide-react";
-import type { Session } from "@supabase/supabase-js";
 import { AuthPanel } from "@/components/AuthPanel";
 import { leadToInsert, rowToLead } from "@/lib/leads-db";
 import {
@@ -33,7 +45,7 @@ import {
   projectSizes,
   urgencies
 } from "@/lib/types";
-import { scoreBand, scoreLead } from "@/lib/scoring";
+import { scoreLead } from "@/lib/scoring";
 import { supabase } from "@/lib/supabase";
 
 const blankLead: LeadInput = {
@@ -64,6 +76,20 @@ const defaultFilters: Filters = {
   search: ""
 };
 
+type ImportHistoryItem = {
+  id: string;
+  timestamp: string;
+  imported: number;
+  skipped: number;
+  duplicates: number;
+};
+
+type ActivityItem = {
+  id: string;
+  date: string;
+  text: string;
+};
+
 export default function HomePage() {
   const [session, setSession] = useState<Session | null>(null);
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
@@ -76,6 +102,18 @@ export default function HomePage() {
   const [generatedMessage, setGeneratedMessage] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
   const [dataMessage, setDataMessage] = useState("");
+  const [toast, setToast] = useState("");
+  const [importHistory, setImportHistory] = useState<ImportHistoryItem[]>([]);
+  const [messagesSentToday, setMessagesSentToday] = useState(0);
+  const [lastOutreach, setLastOutreach] = useState<{ company: string; time: Date } | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [mobileLeadModalOpen, setMobileLeadModalOpen] = useState(false);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [selectedRows, setSelectedRows] = useState<string[]>([]);
+  const [bulkStatus, setBulkStatus] = useState<Lead["status"]>("Contacted");
+  const [activityLeadId, setActivityLeadId] = useState("");
+  const [activityNote, setActivityNote] = useState("");
+  const [activityLogs, setActivityLogs] = useState<Record<string, ActivityItem[]>>({});
 
   useEffect(() => {
     if (!supabase) {
@@ -144,11 +182,13 @@ export default function HomePage() {
   }, [filters, leads]);
 
   const selectedLead = leads.find((lead) => lead.id === selectedLeadId) || filteredLeads[0] || leads[0] || null;
+  const activeActivityLead = leads.find((lead) => lead.id === activityLeadId) || null;
+  const duplicateWarning = getDuplicateWarning(form, leads);
 
   const metrics = useMemo(() => {
     return {
       total: leads.length,
-      hot: leads.filter((lead) => lead.score >= 75).length,
+      hot: leads.filter((lead) => lead.score >= 80).length,
       quotations: leads.filter((lead) => lead.status === "Quotation Sent").length,
       won: leads.filter((lead) => lead.status === "Won").length
     };
@@ -156,7 +196,7 @@ export default function HomePage() {
 
   async function addLead(event: FormEvent) {
     event.preventDefault();
-    if (!supabase || !session?.user.id) return;
+    if (!supabase || !session?.user.id || duplicateWarning) return;
     const score = scoreLead(form);
     const { data, error } = await supabase
       .from("leads")
@@ -172,7 +212,9 @@ export default function HomePage() {
     const nextLead = rowToLead(data);
     setLeads((current) => [nextLead, ...current]);
     setSelectedLeadId(nextLead.id);
+    addActivity(nextLead.id, "Lead created");
     setForm(blankLead);
+    setMobileLeadModalOpen(false);
   }
 
   async function updateStatus(id: string, status: Lead["status"]) {
@@ -192,6 +234,7 @@ export default function HomePage() {
         return { ...updated, score: scoreLead(updated) };
       })
     );
+    addActivity(id, `Status updated to ${status}`);
   }
 
   async function updateFollowUp(id: string, nextFollowUp: string) {
@@ -202,6 +245,42 @@ export default function HomePage() {
       return;
     }
     setLeads((current) => current.map((lead) => (lead.id === id ? { ...lead, nextFollowUp } : lead)));
+    addActivity(id, nextFollowUp ? `Follow-up set for ${nextFollowUp}` : "Follow-up cleared");
+  }
+
+  async function bulkUpdateStatus() {
+    if (!supabase || !selectedRows.length) return;
+    const client = supabase;
+    const updates = leads
+      .filter((lead) => selectedRows.includes(lead.id))
+      .map((lead) => ({ id: lead.id, score: scoreLead({ ...lead, status: bulkStatus }) }));
+
+    await Promise.all(
+      updates.map((item) => client.from("leads").update({ status: bulkStatus, score: item.score }).eq("id", item.id))
+    );
+
+    setLeads((current) =>
+      current.map((lead) => {
+        if (!selectedRows.includes(lead.id)) return lead;
+        const updated = { ...lead, status: bulkStatus };
+        return { ...updated, score: scoreLead(updated) };
+      })
+    );
+    selectedRows.forEach((id) => addActivity(id, `Bulk status updated to ${bulkStatus}`));
+    setSelectedRows([]);
+  }
+
+  async function deleteSelected() {
+    if (!supabase || !selectedRows.length) return;
+    const confirmed = window.confirm(`Delete ${selectedRows.length} selected lead(s)?`);
+    if (!confirmed) return;
+    const { error } = await supabase.from("leads").delete().in("id", selectedRows);
+    if (error) {
+      setDataMessage(error.message);
+      return;
+    }
+    setLeads((current) => current.filter((lead) => !selectedRows.includes(lead.id)));
+    setSelectedRows([]);
   }
 
   function toggleProduct(product: (typeof products)[number]) {
@@ -222,16 +301,35 @@ export default function HomePage() {
       skipEmptyLines: true,
       complete: (result: Papa.ParseResult<Record<string, string>>) => {
         if (!supabase || !session?.user.id) return;
-        const importedInputs = result.data.map((row, index) => {
+
+        let skipped = 0;
+        let duplicates = 0;
+        const seen = new Set(leads.map((lead) => `${lead.companyName.toLowerCase()}|${lead.email.toLowerCase()}`));
+
+        const importedInputs = result.data.flatMap((row, index) => {
+          const companyName = row.companyName || row.company || `Imported Lead ${index + 1}`;
+          const email = row.email || "";
+          const key = `${companyName.toLowerCase()}|${email.toLowerCase()}`;
+          if (!companyName.trim()) {
+            skipped += 1;
+            return [];
+          }
+          if (seen.has(key)) {
+            duplicates += 1;
+            return [];
+          }
+          seen.add(key);
+
           const productsRequired = (row.productsRequired || row.products || "Universal beams")
             .split(",")
             .map((item) => item.trim())
             .filter((item) => products.includes(item as never)) as Lead["productsRequired"];
+
           const lead: LeadInput = {
-            companyName: row.companyName || row.company || `Imported Lead ${index + 1}`,
+            companyName,
             contactPerson: row.contactPerson || row.contact || "",
             jobTitle: row.jobTitle || "",
-            email: row.email || "",
+            email,
             phone: row.phone || row.whatsapp || "",
             emirate: emirates.includes(row.emirate as never) ? (row.emirate as Lead["emirate"]) : "Dubai",
             industry: industries.includes(row.industry as never) ? (row.industry as Lead["industry"]) : "Construction",
@@ -245,9 +343,19 @@ export default function HomePage() {
             pastInquiry: ["true", "yes", "1"].includes((row.pastInquiry || "").toLowerCase()),
             nextFollowUp: row.nextFollowUp || ""
           };
-          return lead;
+          return [lead];
         });
+
         const rows = importedInputs.map((lead) => leadToInsert(lead, session.user.id, scoreLead(lead)));
+        if (!rows.length) {
+          showToast(`CSV import: 0 imported, ${skipped} skipped, ${duplicates} duplicates ignored.`);
+          setImportHistory((current) => [
+            { id: `${Date.now()}`, timestamp: new Date().toISOString(), imported: 0, skipped, duplicates },
+            ...current
+          ].slice(0, 5));
+          return;
+        }
+
         supabase
           .from("leads")
           .insert(rows)
@@ -257,10 +365,18 @@ export default function HomePage() {
               setDataMessage(error.message);
               return;
             }
-            setLeads((current) => [...(data || []).map(rowToLead), ...current]);
+            const imported = (data || []).map(rowToLead);
+            setLeads((current) => [...imported, ...current]);
+            imported.forEach((lead) => addActivity(lead.id, "Imported from CSV"));
+            showToast(`CSV import: ${imported.length} imported, ${skipped} skipped, ${duplicates} duplicates ignored.`);
+            setImportHistory((current) => [
+              { id: `${Date.now()}`, timestamp: new Date().toISOString(), imported: imported.length, skipped, duplicates },
+              ...current
+            ].slice(0, 5));
           });
       }
     });
+    event.target.value = "";
   }
 
   async function generateMessage() {
@@ -277,7 +393,79 @@ export default function HomePage() {
     });
     const data = await response.json();
     setGeneratedMessage(data.message || data.error || "Unable to generate message.");
+    setMessagesSentToday((count) => count + 1);
+    setLastOutreach({ company: selectedLead.companyName, time: new Date() });
+    addActivity(selectedLead.id, `${messageType} generated`);
     setIsGenerating(false);
+  }
+
+  function exportPdf() {
+    const doc = new jsPDF({ orientation: "landscape" });
+    const today = new Date().toLocaleDateString();
+    doc.setFillColor(31, 122, 140);
+    doc.rect(0, 0, 297, 22, "F");
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(18);
+    doc.text("SteelLead AI", 12, 14);
+    doc.setFontSize(10);
+    doc.text(`Filtered Leads Export - ${today}`, 225, 14);
+    doc.setTextColor(23, 32, 51);
+    doc.setFontSize(9);
+
+    const headers = ["Company", "Contact", "Emirate", "Industry", "Products", "Score", "Status"];
+    const widths = [52, 40, 28, 38, 62, 18, 32];
+    let x = 12;
+    let y = 34;
+    headers.forEach((header, index) => {
+      doc.setFont("helvetica", "bold");
+      doc.text(header, x, y);
+      x += widths[index];
+    });
+    doc.setFont("helvetica", "normal");
+
+    filteredLeads.forEach((lead) => {
+      y += 9;
+      if (y > 190) {
+        doc.addPage();
+        y = 20;
+      }
+      x = 12;
+      [
+        lead.companyName,
+        lead.contactPerson,
+        lead.emirate,
+        lead.industry,
+        lead.productsRequired.join(", "),
+        String(lead.score),
+        lead.status
+      ].forEach((value, index) => {
+        doc.text(doc.splitTextToSize(value || "-", widths[index] - 3), x, y);
+        x += widths[index];
+      });
+    });
+
+    doc.save(`steellead-ai-leads-${new Date().toISOString().slice(0, 10)}.pdf`);
+  }
+
+  function showToast(message: string) {
+    setToast(message);
+    window.setTimeout(() => setToast(""), 5000);
+  }
+
+  function addActivity(leadId: string, text: string) {
+    setActivityLogs((current) => ({
+      ...current,
+      [leadId]: [
+        { id: `${Date.now()}-${Math.random()}`, date: new Date().toISOString(), text },
+        ...(current[leadId] || [])
+      ]
+    }));
+  }
+
+  function saveActivityNote() {
+    if (!activityLeadId || !activityNote.trim()) return;
+    addActivity(activityLeadId, activityNote.trim());
+    setActivityNote("");
   }
 
   async function logout() {
@@ -299,54 +487,60 @@ export default function HomePage() {
 
   return (
     <main className="min-h-screen">
-      <header className="border-b border-slate-200 bg-white/90 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl flex-col gap-4 px-4 py-4 md:flex-row md:items-center md:justify-between">
+      {toast ? (
+        <div className="fixed right-4 top-4 z-50 max-w-sm rounded-lg border border-teal-200 bg-white p-4 text-sm shadow-panel">
+          {toast}
+        </div>
+      ) : null}
+
+      <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/95 backdrop-blur">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-4">
           <div className="flex items-center gap-3">
+            <button className="focus-ring rounded-md border border-slate-200 p-2 lg:hidden" onClick={() => setSidebarOpen(true)} aria-label="Open menu">
+              <Menu size={20} />
+            </button>
             <span className="grid h-11 w-11 place-items-center rounded-md bg-ink text-white">
               <Building2 size={24} />
             </span>
             <div>
               <h1 className="text-2xl font-semibold">SteelLead AI</h1>
-              <p className="text-sm text-steel">Structural steel lead generation for Dubai and UAE sales teams</p>
+              <p className="hidden text-sm text-steel sm:block">Structural steel lead generation for Dubai and UAE sales teams</p>
             </div>
           </div>
-          <div className="flex flex-col gap-2 text-sm md:items-end">
-            <span className="text-steel">{session.user.email}</span>
-            <button className="focus-ring inline-flex items-center justify-center gap-2 rounded-md bg-alloy px-4 py-2 font-semibold text-white" onClick={logout}>
-              <LogOut size={17} /> Logout
+          <div className="relative">
+            <button className="focus-ring inline-flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 py-2 text-sm font-semibold" onClick={() => setProfileOpen((open) => !open)}>
+              <UserCircle size={20} />
+              <span className="hidden sm:inline">{session.user.email}</span>
+              <ChevronDown size={16} />
             </button>
+            {profileOpen ? (
+              <div className="absolute right-0 mt-2 w-56 rounded-md border border-slate-200 bg-white p-2 text-sm shadow-panel">
+                <button className="flex w-full items-center gap-2 rounded px-3 py-2 text-left hover:bg-slate-50">
+                  <UserCircle size={16} /> Profile
+                </button>
+                <button className="flex w-full items-center gap-2 rounded px-3 py-2 text-left hover:bg-slate-50">
+                  <Settings size={16} /> Settings
+                </button>
+                <button className="flex w-full items-center gap-2 rounded px-3 py-2 text-left text-red-600 hover:bg-red-50" onClick={logout}>
+                  <X size={16} /> Logout
+                </button>
+              </div>
+            ) : null}
           </div>
         </div>
       </header>
 
       <div className="mx-auto grid max-w-7xl gap-6 px-4 py-6 lg:grid-cols-[260px_1fr]">
-        <aside className="h-fit rounded-lg border border-slate-200 bg-white p-4 shadow-panel">
-          <nav className="grid gap-2 text-sm font-medium">
-            {([
-              ["Dashboard", LayoutDashboard],
-              ["Lead database", Users],
-              ["AI outreach", Bot],
-              ["Sales pipeline", BarChart3],
-              ["Follow-ups", Bell]
-            ] as const).map(([label, Icon]) => (
-              <a key={label as string} className="flex items-center gap-3 rounded-md px-3 py-2 text-ink hover:bg-slate-100" href={`#${String(label).toLowerCase().replaceAll(" ", "-")}`}>
-                <Icon size={18} />
-                {label as string}
-              </a>
-            ))}
-          </nav>
-          <div className="mt-6 rounded-md bg-slate-50 p-3 text-xs leading-5 text-steel">
-            Manual entry, CSV import, and compliant public-source enrichment only. No illegal scraping workflows are included.
-          </div>
-        </aside>
+        <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
 
         <section className="grid gap-6">
           {dataMessage ? <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">{dataMessage}</div> : null}
-          <section id="dashboard" className="grid gap-4 md:grid-cols-4">
-            <Metric label="Total leads" value={metrics.total} icon={<Users size={20} />} />
-            <Metric label="Hot leads" value={metrics.hot} icon={<Flame size={20} />} />
-            <Metric label="Quotations sent" value={metrics.quotations} icon={<Send size={20} />} />
-            <Metric label="Won deals" value={metrics.won} icon={<BarChart3 size={20} />} />
+
+          <section id="dashboard" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+            <Metric label="Total leads" value={metrics.total} trend="up 20 percent this week" color="teal" icon={<Users size={20} />} />
+            <Metric label="Hot leads" value={metrics.hot} trend="up 12 percent this week" color="amber" icon={<Flame size={20} />} />
+            <Metric label="Quotations sent" value={metrics.quotations} trend="up 8 percent this week" color="purple" icon={<Send size={20} />} />
+            <Metric label="Won deals" value={metrics.won} trend="up 5 percent this week" color="green" icon={<BarChart3 size={20} />} />
           </section>
 
           <section className="grid gap-6 xl:grid-cols-[1.2fr_0.8fr]">
@@ -355,11 +549,16 @@ export default function HomePage() {
                 <h2 className="flex items-center gap-2 text-xl font-semibold">
                   <Filter size={20} /> Search and filters
                 </h2>
-                <label className="focus-ring inline-flex cursor-pointer items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium">
-                  <Upload size={17} />
-                  CSV import
-                  <input className="hidden" type="file" accept=".csv" onChange={importCsv} />
-                </label>
+                <div className="flex flex-wrap gap-2">
+                  <label className="focus-ring inline-flex cursor-pointer items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium">
+                    <Upload size={17} />
+                    CSV import
+                    <input className="hidden" type="file" accept=".csv" onChange={importCsv} />
+                  </label>
+                  <button className="focus-ring inline-flex items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium" onClick={exportPdf}>
+                    <FileText size={17} /> Export PDF
+                  </button>
+                </div>
               </div>
               <div className="mt-4 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
                 <TextInput icon={<Search size={16} />} placeholder="Search leads" value={filters.search} onChange={(value) => setFilters({ ...filters, search: value })} />
@@ -369,16 +568,40 @@ export default function HomePage() {
                 <Select value={filters.product} onChange={(value) => setFilters({ ...filters, product: value })} options={["", ...products]} label="All products" />
                 <label className="text-xs font-medium text-steel">
                   Min score
-                  <input className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2" type="number" min={0} max={100} value={filters.minScore} onChange={(event) => setFilters({ ...filters, minScore: Number(event.target.value) })} />
+                  <input className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" type="number" min={0} max={100} value={filters.minScore} onChange={(event) => setFilters({ ...filters, minScore: Number(event.target.value) })} />
                 </label>
               </div>
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-1">
+              <OutreachSummary sentToday={messagesSentToday} lastOutreach={lastOutreach} />
               <Breakdown title="Leads by emirate" labels={emirates} leads={leads} field="emirate" />
               <Breakdown title="Leads by industry" labels={industries} leads={leads} field="industry" />
             </div>
           </section>
+
+          {importHistory.length ? (
+            <section className="rounded-lg border border-slate-200 bg-white p-4 shadow-panel">
+              <h2 className="text-lg font-semibold">Import History</h2>
+              <div className="mt-3 grid gap-2 md:grid-cols-5">
+                {importHistory.map((item) => (
+                  <div key={item.id} className="rounded-md border border-slate-200 p-3 text-sm">
+                    <div className="font-semibold">{item.imported} rows</div>
+                    <div className="mt-1 text-xs text-steel">{new Date(item.timestamp).toLocaleString()}</div>
+                    <div className="mt-2 text-xs text-steel">{item.skipped} skipped | {item.duplicates} duplicates</div>
+                  </div>
+                ))}
+              </div>
+            </section>
+          ) : null}
+
+          <BulkActionBar
+            count={selectedRows.length}
+            status={bulkStatus}
+            onStatusChange={(value) => setBulkStatus(value as Lead["status"])}
+            onApply={bulkUpdateStatus}
+            onDelete={deleteSelected}
+          />
 
           <section id="lead-database" className="grid gap-6 xl:grid-cols-[1fr_390px]">
             <div className="rounded-lg border border-slate-200 bg-white shadow-panel">
@@ -387,30 +610,66 @@ export default function HomePage() {
                 <span className="text-sm text-steel">{filteredLeads.length} shown</span>
               </div>
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[920px] text-left text-sm">
+                <table className="w-full min-w-[1040px] text-left text-sm">
                   <thead className="bg-slate-50 text-xs uppercase text-steel">
                     <tr>
+                      <th className="px-4 py-3">
+                        <input
+                          type="checkbox"
+                          checked={Boolean(filteredLeads.length) && filteredLeads.every((lead) => selectedRows.includes(lead.id))}
+                          onChange={(event) =>
+                            setSelectedRows(event.target.checked ? filteredLeads.map((lead) => lead.id) : [])
+                          }
+                        />
+                      </th>
                       <th className="px-4 py-3">Company</th>
                       <th className="px-4 py-3">Contact</th>
                       <th className="px-4 py-3">Emirate</th>
                       <th className="px-4 py-3">Products</th>
-                      <th className="px-4 py-3">Score</th>
+                      <th className="px-4 py-3">
+                        <span className="group relative inline-flex items-center gap-1">
+                          Score
+                          <HelpCircle size={14} />
+                          <span className="absolute left-0 top-6 z-20 hidden w-72 rounded-md bg-ink p-3 normal-case text-white shadow-panel group-hover:block">
+                            80 to 100 is Hot shown in red badge, 50 to 79 is Warm shown in orange badge, below 50 is Cold shown in grey badge.
+                          </span>
+                        </span>
+                      </th>
                       <th className="px-4 py-3">Status</th>
                       <th className="px-4 py-3">Follow-up</th>
+                      <th className="px-4 py-3">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {!filteredLeads.length ? (
                       <tr>
-                        <td className="px-4 py-8 text-center text-steel" colSpan={7}>
-                          No leads yet. Add one manually or import a CSV.
+                        <td className="px-4 py-12" colSpan={9}>
+                          <div className="mx-auto max-w-md text-center">
+                            <AlertCircle className="mx-auto text-steel" size={36} />
+                            <h3 className="mt-3 text-lg font-semibold">No leads match your filters</h3>
+                            <p className="mt-1 text-sm text-steel">Try adjusting the search or filters above.</p>
+                            <button className="focus-ring mt-4 rounded-md bg-alloy px-4 py-2 font-semibold text-white" onClick={() => setFilters(defaultFilters)}>
+                              Clear Filters
+                            </button>
+                          </div>
                         </td>
                       </tr>
                     ) : null}
                     {filteredLeads.map((lead) => {
-                      const band = scoreBand(lead.score);
+                      const scoreStyle = getScoreStyle(lead.score);
                       return (
                         <tr key={lead.id} onClick={() => setSelectedLeadId(lead.id)} className="cursor-pointer border-t border-slate-100 hover:bg-slate-50">
+                          <td className="px-4 py-3" onClick={(event) => event.stopPropagation()}>
+                            <input
+                              type="checkbox"
+                              checked={selectedRows.includes(lead.id)}
+                              onChange={(event) =>
+                                setSelectedRows((current) =>
+                                  event.target.checked ? [...current, lead.id] : current.filter((id) => id !== lead.id)
+                                )
+                              }
+                            />
+                          </td>
                           <td className="px-4 py-3">
                             <div className="font-semibold">{lead.companyName}</div>
                             <div className="text-xs text-steel">{lead.industry} | {lead.projectType}</div>
@@ -422,15 +681,25 @@ export default function HomePage() {
                           <td className="px-4 py-3">{lead.emirate}</td>
                           <td className="px-4 py-3">{lead.productsRequired.join(", ")}</td>
                           <td className="px-4 py-3">
-                            <span className={`rounded-full px-2 py-1 text-xs font-semibold ${band.color}`}>{lead.score} {band.label}</span>
+                            <span className={`rounded-full px-2 py-1 text-xs font-semibold text-white ${scoreStyle.bg}`}>{lead.score} {scoreStyle.label}</span>
                           </td>
-                          <td className="px-4 py-3">
-                            <select className="rounded-md border border-slate-200 px-2 py-1" value={lead.status} onChange={(event) => updateStatus(lead.id, event.target.value as Lead["status"])}>
+                          <td className="px-4 py-3" onClick={(event) => event.stopPropagation()}>
+                            <select className="rounded-md border border-slate-200 px-2 py-1 focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" value={lead.status} onChange={(event) => updateStatus(lead.id, event.target.value as Lead["status"])}>
                               {leadStatuses.map((status) => <option key={status}>{status}</option>)}
                             </select>
                           </td>
-                          <td className="px-4 py-3">
-                            <input className="rounded-md border border-slate-200 px-2 py-1" type="date" value={lead.nextFollowUp} onChange={(event) => updateFollowUp(lead.id, event.target.value)} />
+                          <td className="px-4 py-3" onClick={(event) => event.stopPropagation()}>
+                            <FollowUpInput lead={lead} onChange={updateFollowUp} />
+                          </td>
+                          <td className="px-4 py-3" onClick={(event) => event.stopPropagation()}>
+                            <div className="flex items-center gap-2">
+                              <button className="rounded-md border border-slate-200 p-2 text-green-600 hover:bg-green-50" onClick={() => openWhatsApp(lead.phone)} title="Open WhatsApp">
+                                <MessageCircle size={16} />
+                              </button>
+                              <button className="rounded-md border border-slate-200 p-2 text-alloy hover:bg-slate-50" onClick={() => setActivityLeadId(lead.id)} title="Activity log">
+                                <Clock size={16} />
+                              </button>
+                            </div>
                           </td>
                         </tr>
                       );
@@ -440,50 +709,16 @@ export default function HomePage() {
               </div>
             </div>
 
-            <form onSubmit={addLead} className="rounded-lg border border-slate-200 bg-white p-4 shadow-panel">
-              <h2 className="flex items-center gap-2 text-xl font-semibold"><ListPlus size={20} /> Add lead</h2>
-              <div className="mt-4 grid gap-3">
-                {[
-                  ["Company name", "companyName"],
-                  ["Contact person", "contactPerson"],
-                  ["Job title", "jobTitle"],
-                  ["Email", "email"],
-                  ["Phone / WhatsApp", "phone"],
-                  ["Project type", "projectType"],
-                  ["Lead source", "leadSource"]
-                ].map(([label, key]) => (
-                  <label key={key} className="text-xs font-medium text-steel">
-                    {label}
-                    <input required={key === "companyName"} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-ink" value={String(form[key as keyof LeadInput])} onChange={(event) => setForm({ ...form, [key]: event.target.value })} />
-                  </label>
-                ))}
-                <div className="grid grid-cols-2 gap-3">
-                  <Select value={form.emirate} onChange={(value) => setForm({ ...form, emirate: value as Lead["emirate"] })} options={emirates} label="Emirate" />
-                  <Select value={form.industry} onChange={(value) => setForm({ ...form, industry: value as Lead["industry"] })} options={industries} label="Industry" />
-                  <Select value={form.projectSize} onChange={(value) => setForm({ ...form, projectSize: value as Lead["projectSize"] })} options={projectSizes} label="Project size" />
-                  <Select value={form.urgency} onChange={(value) => setForm({ ...form, urgency: value as Lead["urgency"] })} options={urgencies} label="Urgency" />
-                </div>
-                <div>
-                  <p className="text-xs font-medium text-steel">Products required</p>
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {products.map((product) => (
-                      <button key={product} type="button" onClick={() => toggleProduct(product)} className={`rounded-full border px-3 py-1 text-xs font-medium ${form.productsRequired.includes(product) ? "border-alloy bg-alloy text-white" : "border-slate-200 bg-white text-ink"}`}>
-                        {product}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <label className="text-xs font-medium text-steel">
-                  Notes
-                  <textarea className="mt-1 min-h-20 w-full rounded-md border border-slate-200 px-3 py-2 text-ink" value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} />
-                </label>
-                <label className="inline-flex items-center gap-2 text-sm">
-                  <input type="checkbox" checked={form.pastInquiry} onChange={(event) => setForm({ ...form, pastInquiry: event.target.checked })} />
-                  Past inquiry
-                </label>
-                <button className="focus-ring rounded-md bg-ink px-4 py-3 font-semibold text-white">Add lead</button>
-              </div>
-            </form>
+            <div className="hidden md:block">
+              <LeadForm
+                form={form}
+                setForm={setForm}
+                onSubmit={addLead}
+                onClear={() => setForm(blankLead)}
+                onToggleProduct={toggleProduct}
+                duplicateWarning={duplicateWarning}
+              />
+            </div>
           </section>
 
           <section id="ai-outreach" className="grid gap-6 lg:grid-cols-[360px_1fr]">
@@ -494,7 +729,7 @@ export default function HomePage() {
                 <Select value={messageType} onChange={(value) => setMessageType(value as never)} options={messageTypes} label="Message type" />
                 <label className="text-xs font-medium text-steel">
                   Objective
-                  <textarea className="mt-1 min-h-24 w-full rounded-md border border-slate-200 px-3 py-2 text-ink" value={objective} onChange={(event) => setObjective(event.target.value)} />
+                  <textarea className="mt-1 min-h-24 w-full rounded-md border border-slate-200 px-3 py-2 text-ink focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" value={objective} onChange={(event) => setObjective(event.target.value)} />
                 </label>
                 <button onClick={generateMessage} type="button" className="focus-ring flex items-center justify-center gap-2 rounded-md bg-alloy px-4 py-3 font-semibold text-white">
                   <Send size={18} /> {isGenerating ? "Generating..." : "Generate message"}
@@ -543,11 +778,111 @@ export default function HomePage() {
           </section>
         </section>
       </div>
+
+      <button className="focus-ring fixed bottom-5 right-5 z-40 grid h-14 w-14 place-items-center rounded-full bg-alloy text-white shadow-panel md:hidden" onClick={() => setMobileLeadModalOpen(true)} aria-label="Add lead">
+        <Plus size={24} />
+      </button>
+
+      {mobileLeadModalOpen ? (
+        <div className="fixed inset-0 z-50 overflow-y-auto bg-white p-4 md:hidden">
+          <div className="mb-4 flex items-center justify-between">
+            <h2 className="text-xl font-semibold">Add lead</h2>
+            <button className="rounded-md border border-slate-200 p-2" onClick={() => setMobileLeadModalOpen(false)} aria-label="Close">
+              <X size={20} />
+            </button>
+          </div>
+          <LeadForm
+            form={form}
+            setForm={setForm}
+            onSubmit={addLead}
+            onClear={() => setForm(blankLead)}
+            onToggleProduct={toggleProduct}
+            duplicateWarning={duplicateWarning}
+          />
+        </div>
+      ) : null}
+
+      {activeActivityLead ? (
+        <div className="fixed inset-0 z-50 flex justify-end bg-ink/30" onClick={() => setActivityLeadId("")}>
+          <aside className="h-full w-full max-w-md overflow-y-auto bg-white p-5 shadow-panel" onClick={(event) => event.stopPropagation()}>
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-xl font-semibold">Activity log</h2>
+                <p className="text-sm text-steel">{activeActivityLead.companyName}</p>
+              </div>
+              <button className="rounded-md border border-slate-200 p-2" onClick={() => setActivityLeadId("")} aria-label="Close activity log">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="mt-5 flex gap-2">
+              <input className="min-w-0 flex-1 rounded-md border border-slate-200 px-3 py-2 focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" placeholder="Add note" value={activityNote} onChange={(event) => setActivityNote(event.target.value)} />
+              <button className="rounded-md bg-alloy px-4 py-2 font-semibold text-white" onClick={saveActivityNote}>Add</button>
+            </div>
+            <div className="mt-6 grid gap-4">
+              {(activityLogs[activeActivityLead.id] || [{ id: "created", date: activeActivityLead.createdAt, text: "Lead created" }]).map((item) => (
+                <div key={item.id} className="border-l-2 border-alloy pl-4">
+                  <div className="text-sm font-semibold">{item.text}</div>
+                  <div className="mt-1 text-xs text-steel">{formatDateTime(item.date)}</div>
+                </div>
+              ))}
+            </div>
+          </aside>
+        </div>
+      ) : null}
     </main>
   );
 }
 
-function Metric({ label, value, icon }: { label: string; value: number; icon: ReactNode }) {
+function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const content = (
+    <>
+      <div className="mb-4 flex items-center justify-between lg:hidden">
+        <span className="font-semibold">Navigation</span>
+        <button className="rounded-md border border-slate-200 p-2" onClick={onClose} aria-label="Close menu">
+          <X size={18} />
+        </button>
+      </div>
+      <nav className="grid gap-2 text-sm font-medium">
+        {([
+          ["Dashboard", LayoutDashboard],
+          ["Lead database", Users],
+          ["AI outreach", Bot],
+          ["Sales pipeline", BarChart3],
+          ["Follow-ups", Bell]
+        ] as const).map(([label, Icon]) => (
+          <a key={label} className="flex items-center gap-3 rounded-md px-3 py-2 text-ink hover:bg-slate-100" href={`#${String(label).toLowerCase().replaceAll(" ", "-")}`} onClick={onClose}>
+            <Icon size={18} />
+            {label}
+          </a>
+        ))}
+      </nav>
+      <div className="mt-6 rounded-md bg-slate-50 p-3 text-xs leading-5 text-steel">
+        Manual entry, CSV import, and compliant public-source enrichment only. No illegal scraping workflows are included.
+      </div>
+    </>
+  );
+
+  return (
+    <>
+      <aside className="hidden h-fit rounded-lg border border-slate-200 bg-white p-4 shadow-panel lg:block">{content}</aside>
+      {open ? (
+        <div className="fixed inset-0 z-40 bg-ink/30 lg:hidden" onClick={onClose}>
+          <aside className="h-full w-72 bg-white p-4 shadow-panel" onClick={(event) => event.stopPropagation()}>{content}</aside>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function Metric({ label, value, trend, color, icon }: { label: string; value: number; trend: string; color: "teal" | "amber" | "purple" | "green"; icon: ReactNode }) {
+  const styles = {
+    teal: "text-teal-700 bg-teal-500",
+    amber: "text-amber-700 bg-amber-500",
+    purple: "text-purple-700 bg-purple-500",
+    green: "text-green-700 bg-green-500"
+  }[color];
+  const [textClass, barClass] = styles.split(" ");
+
   return (
     <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-panel">
       <div className="flex items-center justify-between text-steel">
@@ -555,7 +890,120 @@ function Metric({ label, value, icon }: { label: string; value: number; icon: Re
         {icon}
       </div>
       <div className="mt-3 text-3xl font-semibold">{value}</div>
+      <div className={`mt-1 text-xs font-semibold ${textClass}`}>{trend}</div>
+      <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100">
+        <div className={`h-full rounded-full ${barClass}`} style={{ width: `${Math.min(100, Math.max(18, value * 10))}%` }} />
+      </div>
     </div>
+  );
+}
+
+function OutreachSummary({ sentToday, lastOutreach }: { sentToday: number; lastOutreach: { company: string; time: Date } | null }) {
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-panel">
+      <h3 className="flex items-center gap-2 text-sm font-semibold"><Bot size={17} /> AI Outreach Summary</h3>
+      <div className="mt-3 text-3xl font-semibold">{sentToday}</div>
+      <p className="text-xs font-semibold text-teal-700">messages sent today</p>
+      <p className="mt-3 text-sm text-steel">
+        {lastOutreach ? `${lastOutreach.company} - ${timeAgo(lastOutreach.time)}` : "No outreach activity yet"}
+      </p>
+      <a className="focus-ring mt-4 inline-flex rounded-md bg-alloy px-3 py-2 text-sm font-semibold text-white" href="#ai-outreach">
+        Go to AI Outreach
+      </a>
+    </div>
+  );
+}
+
+function LeadForm({
+  form,
+  setForm,
+  onSubmit,
+  onClear,
+  onToggleProduct,
+  duplicateWarning
+}: {
+  form: LeadInput;
+  setForm: (form: LeadInput) => void;
+  onSubmit: (event: FormEvent) => void;
+  onClear: () => void;
+  onToggleProduct: (product: (typeof products)[number]) => void;
+  duplicateWarning: string;
+}) {
+  return (
+    <form onSubmit={onSubmit} className="rounded-lg border border-slate-200 bg-white p-4 shadow-panel">
+      <h2 className="flex items-center gap-2 text-xl font-semibold"><ListPlus size={20} /> Add lead</h2>
+      {duplicateWarning ? (
+        <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">{duplicateWarning}</div>
+      ) : null}
+      <div className="mt-5 grid gap-5">
+        <FormSection title="Company Info">
+          <Field label="Company name" required value={form.companyName} onChange={(value) => setForm({ ...form, companyName: value })} />
+          <Field label="Project type" required value={form.projectType} onChange={(value) => setForm({ ...form, projectType: value })} />
+          <Select value={form.industry} onChange={(value) => setForm({ ...form, industry: value as Lead["industry"] })} options={industries} label="Industry" required />
+        </FormSection>
+
+        <FormSection title="Contact Info">
+          <Field label="Contact person" value={form.contactPerson} onChange={(value) => setForm({ ...form, contactPerson: value })} />
+          <Field label="Job title" value={form.jobTitle} onChange={(value) => setForm({ ...form, jobTitle: value })} />
+          <Field label="Email" type="email" value={form.email} onChange={(value) => setForm({ ...form, email: value })} />
+          <Field label="Phone / WhatsApp" value={form.phone} onChange={(value) => setForm({ ...form, phone: value })} />
+        </FormSection>
+
+        <FormSection title="Lead Details">
+          <Select value={form.emirate} onChange={(value) => setForm({ ...form, emirate: value as Lead["emirate"] })} options={emirates} label="Emirate" required />
+          <div>
+            <p className="text-xs font-medium text-steel">Products <span className="text-red-500">*</span></p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {products.map((product) => (
+                <button key={product} type="button" onClick={() => onToggleProduct(product)} className={`rounded-full border px-3 py-1 text-xs font-medium ${form.productsRequired.includes(product) ? "border-alloy bg-alloy text-white" : "border-slate-200 bg-white text-ink"}`}>
+                  {product}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Select value={form.projectSize} onChange={(value) => setForm({ ...form, projectSize: value as Lead["projectSize"] })} options={projectSizes} label="Project size" />
+            <Select value={form.urgency} onChange={(value) => setForm({ ...form, urgency: value as Lead["urgency"] })} options={urgencies} label="Urgency" />
+            <Select value={form.status} onChange={(value) => setForm({ ...form, status: value as Lead["status"] })} options={leadStatuses} label="Status" />
+            <Field label="Follow-up date" type="date" value={form.nextFollowUp} onChange={(value) => setForm({ ...form, nextFollowUp: value })} />
+          </div>
+          <div className="rounded-md bg-slate-50 p-3 text-sm">
+            <span className="font-semibold">Score:</span> {scoreLead(form)}/100
+          </div>
+          <Field label="Lead source" value={form.leadSource} onChange={(value) => setForm({ ...form, leadSource: value })} />
+          <label className="text-xs font-medium text-steel">
+            Notes
+            <textarea className="mt-1 min-h-20 w-full rounded-md border border-slate-200 px-3 py-2 text-ink focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} />
+          </label>
+          <label className="inline-flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={form.pastInquiry} onChange={(event) => setForm({ ...form, pastInquiry: event.target.checked })} />
+            Past inquiry
+          </label>
+        </FormSection>
+      </div>
+      <div className="mt-5 flex gap-3">
+        <button className="focus-ring flex-1 rounded-md bg-ink px-4 py-3 font-semibold text-white" disabled={Boolean(duplicateWarning)}>Save Lead</button>
+        <button type="button" className="focus-ring rounded-md border border-slate-200 px-4 py-3 font-semibold text-ink" onClick={onClear}>Clear</button>
+      </div>
+    </form>
+  );
+}
+
+function FormSection({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="grid gap-3 border-t border-slate-100 pt-4">
+      <h3 className="text-sm font-semibold text-ink">{title}</h3>
+      {children}
+    </section>
+  );
+}
+
+function Field({ label, value, onChange, type = "text", required = false }: { label: string; value: string; onChange: (value: string) => void; type?: string; required?: boolean }) {
+  return (
+    <label className="text-xs font-medium text-steel">
+      {label} {required ? <span className="text-red-500">*</span> : null}
+      <input required={required} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-ink focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" type={type} value={value} onChange={(event) => onChange(event.target.value)} />
+    </label>
   );
 }
 
@@ -564,18 +1012,20 @@ function Select<T extends readonly string[] | string[]>({
   onChange,
   options,
   label,
-  display
+  display,
+  required = false
 }: {
   value: string;
   onChange: (value: string) => void;
   options: T;
   label: string;
   display?: (value: string) => string;
+  required?: boolean;
 }) {
   return (
     <label className="text-xs font-medium text-steel">
-      {label}
-      <select className="mt-1 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-ink" value={value} onChange={(event) => onChange(event.target.value)}>
+      {label} {required ? <span className="text-red-500">*</span> : null}
+      <select className="mt-1 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-ink focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" value={value} onChange={(event) => onChange(event.target.value)}>
         {options.map((option) => (
           <option key={option} value={option}>
             {option ? display?.(option) || option : label}
@@ -590,7 +1040,7 @@ function TextInput({ icon, placeholder, value, onChange }: { icon: ReactNode; pl
   return (
     <label className="text-xs font-medium text-steel">
       Search
-      <span className="mt-1 flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3">
+      <span className="mt-1 flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 focus-within:border-alloy focus-within:ring-2 focus-within:ring-alloy/20">
         {icon}
         <input className="w-full py-2 outline-none" placeholder={placeholder} value={value} onChange={(event) => onChange(event.target.value)} />
       </span>
@@ -611,10 +1061,10 @@ function Breakdown({
 }) {
   const max = Math.max(1, ...labels.map((label) => leads.filter((lead) => lead[field] === label).length));
   return (
-    <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-panel">
+    <div className="max-h-80 overflow-y-auto rounded-lg border border-slate-200 bg-white p-4 shadow-panel">
       <h3 className="text-sm font-semibold">{title}</h3>
       <div className="mt-3 grid gap-2">
-        {labels.slice(0, 5).map((label) => {
+        {labels.map((label) => {
           const count = leads.filter((lead) => lead[field] === label).length;
           return (
             <div key={label}>
@@ -631,4 +1081,85 @@ function Breakdown({
       </div>
     </div>
   );
+}
+
+function BulkActionBar({ count, status, onStatusChange, onApply, onDelete }: { count: number; status: string; onStatusChange: (value: string) => void; onApply: () => void; onDelete: () => void }) {
+  if (!count) return null;
+  return (
+    <div className="sticky top-20 z-20 flex flex-col gap-3 rounded-lg border border-slate-200 bg-white p-3 shadow-panel md:flex-row md:items-center md:justify-between">
+      <span className="text-sm font-semibold">{count} selected</span>
+      <div className="flex flex-wrap gap-2">
+        <select className="rounded-md border border-slate-200 px-3 py-2 text-sm" value={status} onChange={(event) => onStatusChange(event.target.value)}>
+          {leadStatuses.map((item) => <option key={item}>{item}</option>)}
+        </select>
+        <button className="rounded-md bg-alloy px-3 py-2 text-sm font-semibold text-white" onClick={onApply}>Update Status</button>
+        <button className="inline-flex items-center gap-2 rounded-md bg-red-600 px-3 py-2 text-sm font-semibold text-white" onClick={onDelete}>
+          <Trash2 size={16} /> Delete Selected
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function FollowUpInput({ lead, onChange }: { lead: Lead; onChange: (id: string, value: string) => void }) {
+  const urgency = getFollowUpUrgency(lead.nextFollowUp);
+  return (
+    <input
+      className={`rounded-md border border-slate-200 px-2 py-1 ${urgency.className}`}
+      title={urgency.tooltip}
+      type="date"
+      value={lead.nextFollowUp}
+      onChange={(event) => onChange(lead.id, event.target.value)}
+    />
+  );
+}
+
+function getScoreStyle(score: number) {
+  if (score >= 80) return { label: "Hot", bg: "bg-[#EF4444]" };
+  if (score >= 50) return { label: "Warm", bg: "bg-[#F97316]" };
+  return { label: "Cold", bg: "bg-[#9CA3AF]" };
+}
+
+function getFollowUpUrgency(date: string) {
+  if (!date) return { className: "bg-white", tooltip: "No follow-up date set" };
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const target = new Date(`${date}T00:00:00`);
+  const days = Math.round((target.getTime() - today.getTime()) / 86400000);
+  if (days < 0) return { className: "bg-red-600 text-white", tooltip: `${Math.abs(days)} day(s) overdue` };
+  if (days === 0) return { className: "bg-amber-400 text-ink", tooltip: "Due today" };
+  if (days <= 3) return { className: "bg-orange-100 text-orange-800", tooltip: `${days} day(s) remaining` };
+  return { className: "bg-white", tooltip: `${days} day(s) remaining` };
+}
+
+function getDuplicateWarning(form: LeadInput, leads: Lead[]) {
+  const company = form.companyName.trim().toLowerCase();
+  const email = form.email.trim().toLowerCase();
+  if (!company && !email) return "";
+  const duplicate = leads.find((lead) => {
+    const sameCompany = company && lead.companyName.trim().toLowerCase() === company;
+    const sameEmail = email && lead.email.trim().toLowerCase() === email;
+    return sameCompany || sameEmail;
+  });
+  return duplicate ? `Possible duplicate detected: ${duplicate.companyName} already exists.` : "";
+}
+
+function openWhatsApp(phone: string) {
+  const digits = phone.replace(/[^\d]/g, "");
+  if (!digits) return;
+  window.open(`https://wa.me/${digits}`, "_blank", "noopener,noreferrer");
+}
+
+function timeAgo(date: Date) {
+  const seconds = Math.max(1, Math.floor((Date.now() - date.getTime()) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} minute(s) ago`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours} hour(s) ago`;
+}
+
+function formatDateTime(value: string) {
+  const parsed = value.includes("T") ? new Date(value) : new Date(`${value}T00:00:00`);
+  return parsed.toLocaleString();
 }
