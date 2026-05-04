@@ -54,7 +54,7 @@ For an existing database created from the earlier SteelLead AI schema, run `supa
 
 4. In Supabase Authentication settings:
 
-- Enable Email authentication.
+- Enable Google as an Auth provider and add your Google OAuth client ID and secret.
 - Add `http://localhost:3000` to Site URL or Redirect URLs for local development.
 - Add your Vercel production URL after deployment, for example `https://your-app.vercel.app`.
 
@@ -85,6 +85,8 @@ After deployment, update Supabase Authentication URL settings:
 
 - Site URL: your Vercel app URL, such as `https://steelleadai.vercel.app`
 - Redirect URLs: include the same production URL and any preview URLs you want to support
+
+For Google login, also add the Supabase Google callback URL shown in Supabase Auth provider settings to your Google Cloud OAuth client authorized redirect URIs.
 
 ## CSV Import Format
 
