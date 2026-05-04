@@ -1,3 +1,7 @@
+-- Optional sample data.
+-- For authenticated, per-user lead storage, add a real auth.users.id as created_by
+-- before running this in a Supabase project with row level security enabled.
+
 insert into public.leads (
   company_name,
   contact_person,

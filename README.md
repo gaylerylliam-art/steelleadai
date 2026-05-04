@@ -11,6 +11,8 @@ Lead generation assistant for structural steel trading sales teams in Dubai and 
 - Search and filters for emirate, industry, status, score, and product requirement.
 - CSV import and manual lead entry.
 - AI outreach generator for cold email, LinkedIn, WhatsApp, and follow-up messages.
+- Supabase Auth with sign up, login, logout, and protected dashboard access.
+- Per-user lead storage enforced by Supabase row level security.
 - Supabase schema and seed data.
 
 ## Compliance
@@ -46,16 +48,43 @@ OPENAI_MODEL=gpt-4o-mini
 
 ```bash
 supabase/schema.sql
-supabase/seed.sql
 ```
 
-4. Start the development server:
+For an existing database created from the earlier SteelLead AI schema, run `supabase/auth-migration.sql` to replace the old broad RLS policies with per-user policies.
+
+4. In Supabase Authentication settings:
+
+- Enable Email authentication.
+- Add `http://localhost:3000` to Site URL or Redirect URLs for local development.
+- Add your Vercel production URL after deployment, for example `https://your-app.vercel.app`.
+
+5. Optional sample data:
+
+The app stores leads per authenticated user. To seed sample rows for a real user, first sign up in the app, find that user's `auth.users.id` in Supabase, then adapt `supabase/seed.sql` to include that UUID in the `created_by` column.
+
+6. Start the development server:
 
 ```bash
 npm run dev
 ```
 
-5. Open `http://localhost:3000`.
+7. Open `http://localhost:3000`.
+
+## Vercel Environment Variables
+
+Set these in Vercel under Project Settings -> Environment Variables:
+
+```bash
+NEXT_PUBLIC_SUPABASE_URL=your-supabase-project-url
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-supabase-anon-key
+OPENAI_API_KEY=your-openai-api-key
+OPENAI_MODEL=gpt-4o-mini
+```
+
+After deployment, update Supabase Authentication URL settings:
+
+- Site URL: your Vercel app URL, such as `https://steelleadai.vercel.app`
+- Redirect URLs: include the same production URL and any preview URLs you want to support
 
 ## CSV Import Format
 
@@ -68,4 +97,4 @@ ABC Contracting,Ali Khan,Procurement Manager,ali@example.com,+971 50 000 0000,Du
 
 ## Notes
 
-The current UI uses sample data and local browser state for a fast demo. The Supabase schema is included so the next step is replacing the local state reads/writes with Supabase queries and Supabase Auth sessions.
+The dashboard is protected client-side with Supabase Auth and server-side at the database layer with row level security. Users can only read and modify rows where `created_by` matches their authenticated user ID.

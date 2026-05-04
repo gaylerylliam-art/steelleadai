@@ -60,20 +60,20 @@ alter table public.leads enable row level security;
 create policy "Authenticated users can read leads"
 on public.leads for select
 to authenticated
-using (true);
+using (auth.uid() = created_by);
 
 create policy "Authenticated users can insert leads"
 on public.leads for insert
 to authenticated
-with check (auth.uid() = created_by or created_by is null);
+with check (auth.uid() = created_by);
 
 create policy "Authenticated users can update leads"
 on public.leads for update
 to authenticated
-using (true)
-with check (true);
+using (auth.uid() = created_by)
+with check (auth.uid() = created_by);
 
 create policy "Authenticated users can delete leads"
 on public.leads for delete
 to authenticated
-using (true);
+using (auth.uid() = created_by);

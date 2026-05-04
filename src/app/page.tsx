@@ -1,6 +1,6 @@
 "use client";
 
-import { ChangeEvent, FormEvent, ReactNode, useMemo, useState } from "react";
+import { ChangeEvent, FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
 import Papa from "papaparse";
 import {
   BarChart3,
@@ -12,11 +12,15 @@ import {
   Flame,
   LayoutDashboard,
   ListPlus,
+  LogOut,
   Search,
   Send,
   Upload,
   Users
 } from "lucide-react";
+import type { Session } from "@supabase/supabase-js";
+import { AuthPanel } from "@/components/AuthPanel";
+import { leadToInsert, rowToLead } from "@/lib/leads-db";
 import {
   emirates,
   Filters,
@@ -29,8 +33,8 @@ import {
   projectSizes,
   urgencies
 } from "@/lib/types";
-import { sampleLeads } from "@/lib/sample-data";
 import { scoreBand, scoreLead } from "@/lib/scoring";
+import { supabase } from "@/lib/supabase";
 
 const blankLead: LeadInput = {
   companyName: "",
@@ -61,14 +65,63 @@ const defaultFilters: Filters = {
 };
 
 export default function HomePage() {
-  const [leads, setLeads] = useState<Lead[]>(sampleLeads);
+  const [session, setSession] = useState<Session | null>(null);
+  const [isCheckingAuth, setIsCheckingAuth] = useState(true);
+  const [leads, setLeads] = useState<Lead[]>([]);
   const [filters, setFilters] = useState<Filters>(defaultFilters);
   const [form, setForm] = useState<LeadInput>(blankLead);
-  const [selectedLeadId, setSelectedLeadId] = useState(sampleLeads[0].id);
+  const [selectedLeadId, setSelectedLeadId] = useState("");
   const [messageType, setMessageType] = useState<(typeof messageTypes)[number]>("Cold email");
   const [objective, setObjective] = useState("Introduce steel supply capability and request RFQ details.");
   const [generatedMessage, setGeneratedMessage] = useState("");
   const [isGenerating, setIsGenerating] = useState(false);
+  const [dataMessage, setDataMessage] = useState("");
+
+  useEffect(() => {
+    if (!supabase) {
+      setIsCheckingAuth(false);
+      return;
+    }
+
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      setIsCheckingAuth(false);
+    });
+
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      setSession(nextSession);
+      if (!nextSession) {
+        setLeads([]);
+        setSelectedLeadId("");
+      }
+    });
+
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!session?.user.id) return;
+    loadLeads();
+  }, [session?.user.id]);
+
+  async function loadLeads() {
+    if (!supabase || !session?.user.id) return;
+    setDataMessage("");
+    const { data, error } = await supabase
+      .from("leads")
+      .select("*")
+      .eq("created_by", session.user.id)
+      .order("score", { ascending: false });
+
+    if (error) {
+      setDataMessage(error.message);
+      return;
+    }
+
+    const nextLeads = (data || []).map(rowToLead);
+    setLeads(nextLeads);
+    setSelectedLeadId(nextLeads[0]?.id || "");
+  }
 
   const filteredLeads = useMemo(() => {
     return leads
@@ -90,7 +143,7 @@ export default function HomePage() {
       .sort((a, b) => b.score - a.score);
   }, [filters, leads]);
 
-  const selectedLead = leads.find((lead) => lead.id === selectedLeadId) || filteredLeads[0] || leads[0];
+  const selectedLead = leads.find((lead) => lead.id === selectedLeadId) || filteredLeads[0] || leads[0] || null;
 
   const metrics = useMemo(() => {
     return {
@@ -101,20 +154,37 @@ export default function HomePage() {
     };
   }, [leads]);
 
-  function addLead(event: FormEvent) {
+  async function addLead(event: FormEvent) {
     event.preventDefault();
-    const nextLead: Lead = {
-      ...form,
-      id: `lead-${Date.now()}`,
-      createdAt: new Date().toISOString().slice(0, 10),
-      score: scoreLead(form)
-    };
+    if (!supabase || !session?.user.id) return;
+    const score = scoreLead(form);
+    const { data, error } = await supabase
+      .from("leads")
+      .insert(leadToInsert(form, session.user.id, score))
+      .select()
+      .single();
+
+    if (error) {
+      setDataMessage(error.message);
+      return;
+    }
+
+    const nextLead = rowToLead(data);
     setLeads((current) => [nextLead, ...current]);
     setSelectedLeadId(nextLead.id);
     setForm(blankLead);
   }
 
-  function updateStatus(id: string, status: Lead["status"]) {
+  async function updateStatus(id: string, status: Lead["status"]) {
+    if (!supabase) return;
+    const currentLead = leads.find((lead) => lead.id === id);
+    if (!currentLead) return;
+    const score = scoreLead({ ...currentLead, status });
+    const { error } = await supabase.from("leads").update({ status, score }).eq("id", id);
+    if (error) {
+      setDataMessage(error.message);
+      return;
+    }
     setLeads((current) =>
       current.map((lead) => {
         if (lead.id !== id) return lead;
@@ -124,7 +194,13 @@ export default function HomePage() {
     );
   }
 
-  function updateFollowUp(id: string, nextFollowUp: string) {
+  async function updateFollowUp(id: string, nextFollowUp: string) {
+    if (!supabase) return;
+    const { error } = await supabase.from("leads").update({ next_follow_up: nextFollowUp || null }).eq("id", id);
+    if (error) {
+      setDataMessage(error.message);
+      return;
+    }
     setLeads((current) => current.map((lead) => (lead.id === id ? { ...lead, nextFollowUp } : lead)));
   }
 
@@ -145,7 +221,8 @@ export default function HomePage() {
       header: true,
       skipEmptyLines: true,
       complete: (result: Papa.ParseResult<Record<string, string>>) => {
-        const imported = result.data.map((row, index) => {
+        if (!supabase || !session?.user.id) return;
+        const importedInputs = result.data.map((row, index) => {
           const productsRequired = (row.productsRequired || row.products || "Universal beams")
             .split(",")
             .map((item) => item.trim())
@@ -168,19 +245,29 @@ export default function HomePage() {
             pastInquiry: ["true", "yes", "1"].includes((row.pastInquiry || "").toLowerCase()),
             nextFollowUp: row.nextFollowUp || ""
           };
-          return {
-            ...lead,
-            id: `csv-${Date.now()}-${index}`,
-            createdAt: new Date().toISOString().slice(0, 10),
-            score: scoreLead(lead)
-          };
+          return lead;
         });
-        setLeads((current) => [...imported, ...current]);
+        const rows = importedInputs.map((lead) => leadToInsert(lead, session.user.id, scoreLead(lead)));
+        supabase
+          .from("leads")
+          .insert(rows)
+          .select()
+          .then(({ data, error }) => {
+            if (error) {
+              setDataMessage(error.message);
+              return;
+            }
+            setLeads((current) => [...(data || []).map(rowToLead), ...current]);
+          });
       }
     });
   }
 
   async function generateMessage() {
+    if (!selectedLead) {
+      setGeneratedMessage("Add or import a lead before generating outreach.");
+      return;
+    }
     setIsGenerating(true);
     setGeneratedMessage("");
     const response = await fetch("/api/generate-message", {
@@ -191,6 +278,23 @@ export default function HomePage() {
     const data = await response.json();
     setGeneratedMessage(data.message || data.error || "Unable to generate message.");
     setIsGenerating(false);
+  }
+
+  async function logout() {
+    if (!supabase) return;
+    await supabase.auth.signOut();
+  }
+
+  if (isCheckingAuth) {
+    return (
+      <main className="grid min-h-screen place-items-center px-4">
+        <div className="rounded-lg border border-slate-200 bg-white p-6 shadow-panel">Loading SteelLead AI...</div>
+      </main>
+    );
+  }
+
+  if (!session) {
+    return <AuthPanel onAuthenticated={loadLeads} />;
   }
 
   return (
@@ -206,9 +310,12 @@ export default function HomePage() {
               <p className="text-sm text-steel">Structural steel lead generation for Dubai and UAE sales teams</p>
             </div>
           </div>
-          <a className="focus-ring rounded-md bg-alloy px-4 py-2 text-center font-semibold text-white" href="/login">
-            Login
-          </a>
+          <div className="flex flex-col gap-2 text-sm md:items-end">
+            <span className="text-steel">{session.user.email}</span>
+            <button className="focus-ring inline-flex items-center justify-center gap-2 rounded-md bg-alloy px-4 py-2 font-semibold text-white" onClick={logout}>
+              <LogOut size={17} /> Logout
+            </button>
+          </div>
         </div>
       </header>
 
@@ -234,6 +341,7 @@ export default function HomePage() {
         </aside>
 
         <section className="grid gap-6">
+          {dataMessage ? <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">{dataMessage}</div> : null}
           <section id="dashboard" className="grid gap-4 md:grid-cols-4">
             <Metric label="Total leads" value={metrics.total} icon={<Users size={20} />} />
             <Metric label="Hot leads" value={metrics.hot} icon={<Flame size={20} />} />
@@ -292,6 +400,13 @@ export default function HomePage() {
                     </tr>
                   </thead>
                   <tbody>
+                    {!filteredLeads.length ? (
+                      <tr>
+                        <td className="px-4 py-8 text-center text-steel" colSpan={7}>
+                          No leads yet. Add one manually or import a CSV.
+                        </td>
+                      </tr>
+                    ) : null}
                     {filteredLeads.map((lead) => {
                       const band = scoreBand(lead.score);
                       return (
