@@ -13,6 +13,7 @@ import {
   CalendarClock,
   ChevronDown,
   Clock,
+  Database,
   FileText,
   Filter,
   Flame,
@@ -27,6 +28,7 @@ import {
   Settings,
   Trash2,
   Upload,
+  UserPlus,
   UserCircle,
   Users,
   X
@@ -76,6 +78,8 @@ const defaultFilters: Filters = {
   search: ""
 };
 
+const GENERIC_DATA_ERROR = "Something went wrong loading your data. Please try refreshing.";
+
 type ImportHistoryItem = {
   id: string;
   timestamp: string;
@@ -109,7 +113,7 @@ export default function HomePage() {
   const [messagesSentToday, setMessagesSentToday] = useState(0);
   const [lastOutreach, setLastOutreach] = useState<{ company: string; time: Date } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [mobileLeadModalOpen, setMobileLeadModalOpen] = useState(false);
+  const [leadDrawerOpen, setLeadDrawerOpen] = useState(false);
   const [profileOpen, setProfileOpen] = useState(false);
   const [selectedRows, setSelectedRows] = useState<string[]>([]);
   const [bulkStatus, setBulkStatus] = useState<Lead["status"]>("Contacted");
@@ -117,6 +121,7 @@ export default function HomePage() {
   const [activityNote, setActivityNote] = useState("");
   const [activityLogs, setActivityLogs] = useState<Record<string, ActivityItem[]>>({});
   const [duplicateCheckTouched, setDuplicateCheckTouched] = useState({ companyName: false, email: false });
+  const [activeSection, setActiveSection] = useState("dashboard");
 
   useEffect(() => {
     if (!supabase) {
@@ -141,6 +146,13 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
+    const updateFromHash = () => setActiveSection(window.location.hash.replace("#", "") || "dashboard");
+    updateFromHash();
+    window.addEventListener("hashchange", updateFromHash);
+    return () => window.removeEventListener("hashchange", updateFromHash);
+  }, []);
+
+  useEffect(() => {
     if (!session?.user.id) return;
     loadLeads();
   }, [session?.user.id]);
@@ -155,7 +167,7 @@ export default function HomePage() {
       .order("score", { ascending: false });
 
     if (error) {
-      setDataMessage(error.message);
+      handleDataError(error, "loadLeads");
       return;
     }
 
@@ -208,7 +220,7 @@ export default function HomePage() {
       .single();
 
     if (error) {
-      setDataMessage(error.message);
+      handleDataError(error, "addLead");
       return;
     }
 
@@ -218,7 +230,7 @@ export default function HomePage() {
     addActivity(nextLead.id, "Lead created");
     setForm(blankLead);
     setDuplicateCheckTouched({ companyName: false, email: false });
-    setMobileLeadModalOpen(false);
+    setLeadDrawerOpen(false);
   }
 
   async function updateStatus(id: string, status: Lead["status"]) {
@@ -228,7 +240,7 @@ export default function HomePage() {
     const score = scoreLead({ ...currentLead, status });
     const { error } = await supabase.from("leads").update({ status, score }).eq("id", id);
     if (error) {
-      setDataMessage(error.message);
+      handleDataError(error, "updateStatus");
       return;
     }
     setLeads((current) =>
@@ -245,7 +257,7 @@ export default function HomePage() {
     if (!supabase) return;
     const { error } = await supabase.from("leads").update({ next_follow_up: nextFollowUp || null }).eq("id", id);
     if (error) {
-      setDataMessage(error.message);
+      handleDataError(error, "updateFollowUp");
       return;
     }
     setLeads((current) => current.map((lead) => (lead.id === id ? { ...lead, nextFollowUp } : lead)));
@@ -259,9 +271,15 @@ export default function HomePage() {
       .filter((lead) => selectedRows.includes(lead.id))
       .map((lead) => ({ id: lead.id, score: scoreLead({ ...lead, status: bulkStatus }) }));
 
-    await Promise.all(
+    const results = await Promise.all(
       updates.map((item) => client.from("leads").update({ status: bulkStatus, score: item.score }).eq("id", item.id))
     );
+
+    const failed = results.find((result) => result.error);
+    if (failed?.error) {
+      handleDataError(failed.error, "bulkUpdateStatus");
+      return;
+    }
 
     setLeads((current) =>
       current.map((lead) => {
@@ -280,7 +298,7 @@ export default function HomePage() {
     if (!confirmed) return;
     const { error } = await supabase.from("leads").delete().in("id", selectedRows);
     if (error) {
-      setDataMessage(error.message);
+      handleDataError(error, "deleteSelected");
       return;
     }
     setLeads((current) => current.filter((lead) => !selectedRows.includes(lead.id)));
@@ -369,7 +387,7 @@ export default function HomePage() {
           .select()
           .then(({ data, error }) => {
             if (error) {
-              setDataMessage(error.message);
+              handleDataError(error, "importCsv");
               return;
             }
             const imported = (data || []).map(rowToLead);
@@ -400,7 +418,10 @@ export default function HomePage() {
       body: JSON.stringify({ lead: selectedLead, messageType, objective })
     });
     const data = await response.json();
-    setGeneratedMessage(data.message || data.error || "Unable to generate message.");
+    if (data.error) {
+      console.error("SteelLead AI outreach generation error", data.error);
+    }
+    setGeneratedMessage(data.message || "Unable to generate message right now. Please try again.");
     setMessagesSentToday((count) => count + 1);
     setLastOutreach({ company: selectedLead.companyName, time: new Date() });
     addActivity(selectedLead.id, `${messageType} generated`);
@@ -457,6 +478,11 @@ export default function HomePage() {
     window.setTimeout(() => setToast(""), 5000);
   }
 
+  function handleDataError(error: unknown, context: string) {
+    console.error(`SteelLead AI data error: ${context}`, error);
+    setDataMessage(GENERIC_DATA_ERROR);
+  }
+
   function clearFilters() {
     setFilters(defaultFilters);
     setSelectedRows([]);
@@ -481,6 +507,12 @@ export default function HomePage() {
   function viewExistingLead(leadId: string) {
     setSelectedLeadId(leadId);
     setActivityLeadId(leadId);
+  }
+
+  function navigateTo(section: string) {
+    setActiveSection(section);
+    window.location.hash = section;
+    setSidebarOpen(false);
   }
 
   async function logout() {
@@ -546,11 +578,15 @@ export default function HomePage() {
       </header>
 
       <div className="mx-auto grid max-w-7xl gap-6 px-4 py-6 lg:grid-cols-[260px_1fr]">
-        <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
+        <Sidebar activeSection={activeSection} open={sidebarOpen} onClose={() => setSidebarOpen(false)} onNavigate={navigateTo} />
 
         <section className="grid gap-6">
           {dataMessage ? <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">{dataMessage}</div> : null}
 
+          {activeSection === "sales-pipeline" ? (
+            <SalesPipeline leads={leads} onSelectLead={setSelectedLeadId} />
+          ) : (
+          <>
           <section id="dashboard" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <Metric label="Total leads" value={metrics.total} trend="up 20 percent this week" color="teal" icon={<Users size={20} />} />
             <Metric label="Hot leads" value={metrics.hot} trend="up 12 percent this week" color="amber" icon={<Flame size={20} />} />
@@ -566,7 +602,7 @@ export default function HomePage() {
                 </h2>
                 <div className="flex flex-wrap gap-2">
                   <div>
-                    <label className="focus-ring inline-flex cursor-pointer items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium">
+                    <label className="focus-ring inline-flex cursor-pointer items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium">
                       <Upload size={17} />
                       CSV import
                       <input className="hidden" type="file" accept=".csv" onChange={importCsv} />
@@ -579,7 +615,7 @@ export default function HomePage() {
                       </div>
                     ) : null}
                   </div>
-                  <button className="focus-ring inline-flex items-center gap-2 rounded-md border border-slate-200 px-3 py-2 text-sm font-medium" onClick={exportPdf}>
+                  <button className="focus-ring inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium" onClick={exportPdf}>
                     <FileText size={17} /> Export PDF
                   </button>
                 </div>
@@ -606,7 +642,7 @@ export default function HomePage() {
                 <Select value={filters.product} onChange={(value) => setFilters({ ...filters, product: value })} options={["", ...products]} label="All products" />
                 <label className="text-xs font-medium text-steel">
                   Min score
-                  <input className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" type="number" min={0} max={100} value={filters.minScore} onChange={(event) => setFilters({ ...filters, minScore: Number(event.target.value) })} />
+                  <input className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" type="number" min={0} max={100} value={filters.minScore} onChange={(event) => setFilters({ ...filters, minScore: Number(event.target.value) })} />
                 </label>
               </div>
             </div>
@@ -626,11 +662,16 @@ export default function HomePage() {
             onDelete={deleteSelected}
           />
 
-          <section id="lead-database" className="grid gap-6 xl:grid-cols-[1fr_390px]">
+          <section id="lead-database" className="grid gap-6">
             <div className="rounded-lg border border-slate-200 bg-white shadow-panel">
               <div className="flex items-center justify-between border-b border-slate-200 p-4">
-                <h2 className="text-xl font-semibold">Lead database</h2>
-                <span className="text-sm text-steel">{filteredLeads.length} shown</span>
+                <SectionTitle>Lead database</SectionTitle>
+                <div className="flex items-center gap-3">
+                  <span className="text-sm text-steel">{filteredLeads.length} shown</span>
+                  <button className="focus-ring inline-flex items-center gap-2 rounded-lg bg-alloy px-3 py-2 text-sm font-semibold text-white" onClick={() => setLeadDrawerOpen(true)}>
+                    <UserPlus size={16} /> Add Lead
+                  </button>
+                </div>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full min-w-[1040px] text-left text-sm">
@@ -669,20 +710,39 @@ export default function HomePage() {
                     {!filteredLeads.length ? (
                       <tr>
                         <td className="px-4 py-12" colSpan={9}>
-                          <div className="mx-auto max-w-md text-center">
-                            <Search className="mx-auto text-steel" size={40} />
-                            <h3 className="mt-3 text-lg font-semibold">No leads match your filters</h3>
-                            <p className="mt-1 text-sm text-steel">No leads match your filters, try adjusting the search or filters above.</p>
-                            <button className="focus-ring mt-4 rounded-md bg-alloy px-4 py-2 font-semibold text-white" onClick={clearFilters}>
-                              Clear Filters
-                            </button>
-                          </div>
+                          {leads.length === 0 && filtersAreClear(filters) ? (
+                            <div className="mx-auto max-w-lg text-center">
+                              <div className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-alloy/10 text-alloy">
+                                <Database size={30} />
+                              </div>
+                              <h3 className="mt-4 text-lg font-bold">You have no leads yet</h3>
+                              <p className="mt-2 text-sm text-steel">Add your first lead manually or import a CSV to get started.</p>
+                              <div className="mt-5 flex flex-wrap justify-center gap-3">
+                                <button className="focus-ring inline-flex items-center gap-2 rounded-lg bg-alloy px-4 py-2 font-semibold text-white" onClick={() => setLeadDrawerOpen(true)}>
+                                  <UserPlus size={17} /> Add Lead
+                                </button>
+                                <label className="focus-ring inline-flex cursor-pointer items-center gap-2 rounded-lg border border-alloy bg-white px-4 py-2 font-semibold text-alloy">
+                                  <Upload size={17} /> Import CSV
+                                  <input className="hidden" type="file" accept=".csv" onChange={importCsv} />
+                                </label>
+                              </div>
+                            </div>
+                          ) : (
+                            <div className="mx-auto max-w-md text-center">
+                              <Search className="mx-auto text-steel" size={40} />
+                              <h3 className="mt-3 text-lg font-semibold">No leads match your filters</h3>
+                              <p className="mt-1 text-sm text-steel">Try adjusting the search or filters above.</p>
+                              <button className="focus-ring mt-4 rounded-lg bg-alloy px-4 py-2 font-semibold text-white" onClick={clearFilters}>
+                                Clear Filters
+                              </button>
+                            </div>
+                          )}
                         </td>
                       </tr>
                     ) : null}
                     {filteredLeads.map((lead) => {
                       return (
-                        <tr key={lead.id} onClick={() => setSelectedLeadId(lead.id)} className="cursor-pointer border-t border-slate-100 hover:bg-slate-50">
+                        <tr key={lead.id} onClick={() => setSelectedLeadId(lead.id)} className="cursor-pointer border-t border-slate-100 transition hover:bg-slate-100/80">
                           <td className="px-4 py-3" onClick={(event) => event.stopPropagation()}>
                             <input
                               type="checkbox"
@@ -722,7 +782,7 @@ export default function HomePage() {
                             <ScoreBadge score={lead.score} />
                           </td>
                           <td className="px-4 py-3" onClick={(event) => event.stopPropagation()}>
-                            <select className="rounded-md border border-slate-200 px-2 py-1 focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" value={lead.status} onChange={(event) => updateStatus(lead.id, event.target.value as Lead["status"])}>
+                            <select className="rounded-lg border border-slate-200 px-2 py-1 focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" value={lead.status} onChange={(event) => updateStatus(lead.id, event.target.value as Lead["status"])}>
                               {leadStatuses.map((status) => <option key={status}>{status}</option>)}
                             </select>
                           </td>
@@ -744,30 +804,17 @@ export default function HomePage() {
               </div>
             </div>
 
-            <div className="hidden md:block">
-              <LeadForm
-                form={form}
-                setForm={setForm}
-                onSubmit={addLead}
-                onClear={() => setForm(blankLead)}
-                onToggleProduct={toggleProduct}
-                duplicateLead={duplicateLead}
-                onDuplicateBlur={(field) => setDuplicateCheckTouched((current) => ({ ...current, [field]: true }))}
-                onViewExisting={viewExistingLead}
-                onResetDuplicateCheck={() => setDuplicateCheckTouched({ companyName: false, email: false })}
-              />
-            </div>
           </section>
 
-          <section id="ai-outreach" className="grid gap-6 lg:grid-cols-[360px_1fr]">
+          <section id="ai-outreach" className="grid gap-6 lg:grid-cols-2">
             <div className="rounded-lg border border-slate-200 bg-white p-4 shadow-panel">
-              <h2 className="flex items-center gap-2 text-xl font-semibold"><Bot size={21} /> AI outreach generator</h2>
+              <SectionTitle icon={<Bot size={21} />}>AI outreach generator</SectionTitle>
               <div className="mt-4 grid gap-3">
                 <Select value={selectedLead?.id || ""} onChange={setSelectedLeadId} options={leads.map((lead) => lead.id)} label="Lead" display={(id) => leads.find((lead) => lead.id === id)?.companyName || id} />
                 <Select value={messageType} onChange={(value) => setMessageType(value as never)} options={messageTypes} label="Message type" />
                 <label className="text-xs font-medium text-steel">
                   Objective
-                  <textarea className="mt-1 min-h-24 w-full rounded-md border border-slate-200 px-3 py-2 text-ink focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" value={objective} onChange={(event) => setObjective(event.target.value)} />
+                  <textarea className="mt-1 min-h-24 w-full rounded-lg border border-slate-200 px-3 py-2 text-ink focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" value={objective} onChange={(event) => setObjective(event.target.value)} />
                 </label>
                 <button onClick={generateMessage} type="button" className="focus-ring flex items-center justify-center gap-2 rounded-md bg-alloy px-4 py-3 font-semibold text-white">
                   <Send size={18} /> {isGenerating ? "Generating..." : "Generate message"}
@@ -780,27 +827,8 @@ export default function HomePage() {
             </div>
           </section>
 
-          <section id="sales-pipeline" className="rounded-lg border border-slate-200 bg-white p-4 shadow-panel">
-            <h2 className="text-xl font-semibold">Sales pipeline</h2>
-            <div className="mt-4 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
-              {leadStatuses.map((status) => (
-                <div key={status} className="rounded-md border border-slate-200 bg-slate-50 p-3">
-                  <div className="text-sm font-semibold">{status}</div>
-                  <div className="mt-3 grid gap-2">
-                    {leads.filter((lead) => lead.status === status).slice(0, 4).map((lead) => (
-                      <button key={lead.id} onClick={() => setSelectedLeadId(lead.id)} className="rounded-md bg-white p-2 text-left text-xs shadow-sm">
-                        <span className="font-semibold">{lead.companyName}</span>
-                        <ScoreBadge score={lead.score} className="mt-2" />
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </section>
-
           <section id="follow-ups" className="rounded-lg border border-slate-200 bg-white p-4 shadow-panel">
-            <h2 className="flex items-center gap-2 text-xl font-semibold"><CalendarClock size={20} /> Follow-up reminders</h2>
+            <SectionTitle icon={<CalendarClock size={20} />}>Follow-up reminders</SectionTitle>
             <div className="mt-4 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
               {leads
                 .filter((lead) => lead.nextFollowUp)
@@ -814,18 +842,21 @@ export default function HomePage() {
                 ))}
             </div>
           </section>
+          </>
+          )}
         </section>
       </div>
 
-      <button className="focus-ring fixed bottom-5 right-5 z-40 grid h-14 w-14 place-items-center rounded-full bg-alloy text-white shadow-panel md:hidden" onClick={() => setMobileLeadModalOpen(true)} aria-label="Add lead">
+      <button className="focus-ring fixed bottom-5 right-5 z-40 grid h-14 w-14 place-items-center rounded-full bg-alloy text-white shadow-panel md:hidden" onClick={() => setLeadDrawerOpen(true)} aria-label="Add lead">
         <Plus size={24} />
       </button>
 
-      {mobileLeadModalOpen ? (
-        <div className="fixed inset-0 z-50 overflow-y-auto bg-white p-4 md:hidden">
-          <div className="mb-4 flex items-center justify-between">
-            <h2 className="text-xl font-semibold">Add lead</h2>
-            <button className="rounded-md border border-slate-200 p-2" onClick={() => setMobileLeadModalOpen(false)} aria-label="Close">
+      {leadDrawerOpen ? (
+        <div className="fixed inset-0 z-50 flex justify-end bg-ink/40" onClick={() => setLeadDrawerOpen(false)}>
+          <aside className="h-full w-full max-w-xl animate-slide-in overflow-y-auto bg-white shadow-panel" onClick={(event) => event.stopPropagation()}>
+            <div className="sticky top-0 z-10 flex items-center justify-between border-b border-slate-200 bg-white p-4">
+              <SectionTitle icon={<ListPlus size={20} />}>Add Lead</SectionTitle>
+              <button className="rounded-lg border border-slate-200 p-2 hover:bg-slate-50" onClick={() => setLeadDrawerOpen(false)} aria-label="Close add lead drawer">
               <X size={20} />
             </button>
           </div>
@@ -840,6 +871,7 @@ export default function HomePage() {
             onViewExisting={viewExistingLead}
             onResetDuplicateCheck={() => setDuplicateCheckTouched({ companyName: false, email: false })}
           />
+          </aside>
         </div>
       ) : null}
 
@@ -874,7 +906,56 @@ export default function HomePage() {
   );
 }
 
-function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
+function SectionTitle({ children, icon }: { children: ReactNode; icon?: ReactNode }) {
+  return (
+    <h2 className="flex items-center gap-2 border-l-4 border-alloy pl-3 text-xl font-bold">
+      {icon}
+      {children}
+    </h2>
+  );
+}
+
+function SalesPipeline({ leads, onSelectLead }: { leads: Lead[]; onSelectLead: (id: string) => void }) {
+  return (
+    <section id="sales-pipeline" className="rounded-lg border border-slate-200 bg-white p-4 shadow-panel">
+      <SectionTitle icon={<BarChart3 size={21} />}>Sales pipeline</SectionTitle>
+      <div className="mt-4 grid gap-3 md:grid-cols-3 xl:grid-cols-6">
+        {leadStatuses.map((status) => {
+          const statusLeads = leads.filter((lead) => lead.status === status);
+          return (
+            <div key={status} className="rounded-lg border border-slate-200 bg-slate-50 p-3">
+              <div className="flex items-center justify-between gap-2 text-sm font-semibold">
+                <span>{status}</span>
+                <span className="rounded-full bg-white px-2 py-0.5 text-xs text-steel">{statusLeads.length}</span>
+              </div>
+              <div className="mt-3 grid gap-2">
+                {statusLeads.slice(0, 8).map((lead) => (
+                  <button key={lead.id} onClick={() => onSelectLead(lead.id)} className="rounded-lg bg-white p-2 text-left text-xs shadow-sm transition hover:bg-slate-100">
+                    <span className="font-semibold">{lead.companyName}</span>
+                    <ScoreBadge score={lead.score} className="mt-2" />
+                  </button>
+                ))}
+                {!statusLeads.length ? <div className="rounded-lg border border-dashed border-slate-200 p-3 text-xs text-steel">No leads</div> : null}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function Sidebar({
+  activeSection,
+  open,
+  onClose,
+  onNavigate
+}: {
+  activeSection: string;
+  open: boolean;
+  onClose: () => void;
+  onNavigate: (section: string) => void;
+}) {
   const content = (
     <>
       <div className="mb-4 flex items-center justify-between lg:hidden">
@@ -885,16 +966,23 @@ function Sidebar({ open, onClose }: { open: boolean; onClose: () => void }) {
       </div>
       <nav className="grid gap-2 text-sm font-medium">
         {([
-          ["Dashboard", LayoutDashboard],
-          ["Lead database", Users],
-          ["AI outreach", Bot],
-          ["Sales pipeline", BarChart3],
-          ["Follow-ups", Bell]
-        ] as const).map(([label, Icon]) => (
-          <a key={label} className="flex items-center gap-3 rounded-md px-3 py-2 text-ink hover:bg-slate-100" href={`#${String(label).toLowerCase().replaceAll(" ", "-")}`} onClick={onClose}>
+          ["Dashboard", "dashboard", LayoutDashboard],
+          ["Lead database", "lead-database", Users],
+          ["AI outreach", "ai-outreach", Bot],
+          ["Sales pipeline", "sales-pipeline", BarChart3],
+          ["Follow-ups", "follow-ups", Bell]
+        ] as const).map(([label, section, Icon]) => (
+          <button
+            key={label}
+            className={`flex items-center gap-3 rounded-lg px-3 py-2 text-left transition ${
+              activeSection === section ? "bg-alloy text-white shadow-sm" : "text-ink hover:bg-slate-100"
+            }`}
+            onClick={() => onNavigate(section)}
+            type="button"
+          >
             <Icon size={18} />
             {label}
-          </a>
+          </button>
         ))}
       </nav>
       <div className="mt-6 rounded-md bg-slate-50 p-3 text-xs leading-5 text-steel">
@@ -926,14 +1014,16 @@ function Metric({ label, value, trend, color, icon }: { label: string; value: nu
   const progress = Math.min(100, Math.max(value > 0 ? 12 : 0, value * 10));
 
   return (
-    <div className={`rounded-lg border border-l-4 border-slate-200 bg-white p-4 shadow-panel ${borderClass}`}>
+    <div className={`rounded-lg border border-l-4 border-slate-200 bg-white p-3 shadow-panel ${borderClass}`}>
       <div className="flex items-center justify-between text-steel">
         <span className="text-sm font-medium">{label}</span>
         {icon}
       </div>
-      <div className="mt-3 text-3xl font-semibold">{value}</div>
-      <div className={`mt-1 text-xs font-semibold ${textClass}`}>{trend}</div>
-      <div className="mt-4 h-2 overflow-hidden rounded-full bg-slate-100">
+      <div className="mt-2 text-3xl font-semibold">{value}</div>
+      <div className={`mt-1 text-xs font-semibold ${value === 0 ? "text-slate-400" : textClass}`}>
+        {value === 0 ? "No data yet" : trend}
+      </div>
+      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-slate-100">
         <div className={`h-full rounded-full ${barClass}`} style={{ width: `${progress}%` }} />
       </div>
     </div>
@@ -983,9 +1073,8 @@ function LeadForm({
   }
 
   return (
-    <form onSubmit={onSubmit} className="rounded-lg border border-slate-200 bg-white shadow-panel">
+    <form onSubmit={onSubmit} className="bg-white">
       <div className="p-4 pb-0">
-      <h2 className="flex items-center gap-2 text-xl font-semibold"><ListPlus size={20} /> Add lead</h2>
       {duplicateLead ? (
         <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
           A lead with this company name already exists.
@@ -1026,13 +1115,11 @@ function LeadForm({
             <Select value={form.status} onChange={(value) => setForm({ ...form, status: value as Lead["status"] })} options={leadStatuses} label="Status" />
             <Field label="Follow-up date" type="date" value={form.nextFollowUp} onChange={(value) => setForm({ ...form, nextFollowUp: value })} />
           </div>
-          <div className="rounded-md bg-slate-50 p-3 text-sm">
-            <span className="font-semibold">Score:</span> {scoreLead(form)}/100
-          </div>
+          <ScorePreview score={scoreLead(form)} />
           <Field label="Lead source" value={form.leadSource} onChange={(value) => setForm({ ...form, leadSource: value })} />
           <label className="text-xs font-medium text-steel">
             Notes
-            <textarea className="mt-1 min-h-20 w-full rounded-md border border-slate-200 px-3 py-2 text-ink focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} />
+            <textarea className="mt-1 min-h-20 w-full rounded-lg border border-slate-200 px-3 py-2 text-ink focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} />
           </label>
           <label className="inline-flex items-center gap-2 text-sm">
             <input type="checkbox" checked={form.pastInquiry} onChange={(event) => setForm({ ...form, pastInquiry: event.target.checked })} />
@@ -1062,7 +1149,7 @@ function Field({ label, value, onChange, onBlur, type = "text", required = false
   return (
     <label className="text-xs font-medium text-steel">
       {label} {required ? <span className="text-red-500">*</span> : null}
-      <input required={required} className="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-ink focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" type={type} value={value} onBlur={onBlur} onChange={(event) => onChange(event.target.value)} />
+      <input required={required} className="mt-1 w-full rounded-lg border border-slate-200 px-3 py-2 text-ink focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" type={type} value={value} onBlur={onBlur} onChange={(event) => onChange(event.target.value)} />
     </label>
   );
 }
@@ -1085,7 +1172,7 @@ function Select<T extends readonly string[] | string[]>({
   return (
     <label className="text-xs font-medium text-steel">
       {label} {required ? <span className="text-red-500">*</span> : null}
-      <select className="mt-1 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-ink focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" value={value} onChange={(event) => onChange(event.target.value)}>
+      <select className="mt-1 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-ink focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" value={value} onChange={(event) => onChange(event.target.value)}>
         {options.map((option) => (
           <option key={option} value={option}>
             {option ? display?.(option) || option : label}
@@ -1100,7 +1187,7 @@ function TextInput({ icon, placeholder, value, onChange }: { icon: ReactNode; pl
   return (
     <label className="text-xs font-medium text-steel">
       Search
-      <span className="mt-1 flex items-center gap-2 rounded-md border border-slate-200 bg-white px-3 focus-within:border-alloy focus-within:ring-2 focus-within:ring-alloy/20">
+      <span className="mt-1 flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 focus-within:border-alloy focus-within:ring-2 focus-within:ring-alloy/20">
         {icon}
         <input className="w-full py-2 outline-none" placeholder={placeholder} value={value} onChange={(event) => onChange(event.target.value)} />
       </span>
@@ -1150,7 +1237,7 @@ function BulkActionBar({ count, status, onStatusChange, onApply, onDelete }: { c
     <div className="sticky top-20 z-20 flex flex-col gap-3 rounded-lg border border-slate-200 bg-white p-3 shadow-panel md:flex-row md:items-center md:justify-between">
       <span className="text-sm font-semibold">Update status for selected leads ({count})</span>
       <div className="flex flex-wrap gap-2">
-        <select className="rounded-md border border-slate-200 px-3 py-2 text-sm" value={status} onChange={(event) => onStatusChange(event.target.value)}>
+        <select className="rounded-lg border border-slate-200 px-3 py-2 text-sm focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20" value={status} onChange={(event) => onStatusChange(event.target.value)}>
           {leadStatuses.map((item) => <option key={item}>{item}</option>)}
         </select>
         <button className="rounded-md bg-alloy px-3 py-2 text-sm font-semibold text-white" onClick={onApply}>Update Status</button>
@@ -1166,7 +1253,7 @@ function FollowUpInput({ lead, onChange }: { lead: Lead; onChange: (id: string, 
   const urgency = getFollowUpUrgency(lead.nextFollowUp);
   return (
     <input
-      className={`rounded-md border border-slate-200 bg-transparent px-2 py-1 ${urgency.inputClass}`}
+      className={`rounded-lg border border-slate-200 bg-transparent px-2 py-1 focus:border-alloy focus:outline-none focus:ring-2 focus:ring-alloy/20 ${urgency.inputClass}`}
       title={urgency.tooltip}
       type="date"
       value={lead.nextFollowUp}
@@ -1175,10 +1262,40 @@ function FollowUpInput({ lead, onChange }: { lead: Lead; onChange: (id: string, 
   );
 }
 
+function ScorePreview({ score }: { score: number }) {
+  const color =
+    score >= 70
+      ? "border-green-200 bg-green-50 text-green-700"
+      : score >= 40
+        ? "border-amber-200 bg-amber-50 text-amber-700"
+        : "border-red-200 bg-red-50 text-red-700";
+
+  return (
+    <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 p-3">
+      <span className="text-sm font-semibold text-ink">Lead score</span>
+      <span className={`inline-flex h-14 w-14 items-center justify-center rounded-full border text-base font-bold ${color}`}>
+        {score}
+      </span>
+      <span className="sr-only">out of 100</span>
+    </div>
+  );
+}
+
 function getScoreStyle(score: number) {
   if (score >= 80) return { label: "Hot", bg: "bg-[#EF4444]" };
   if (score >= 50) return { label: "Warm", bg: "bg-[#F97316]" };
   return { label: "Cold", bg: "bg-[#9CA3AF]" };
+}
+
+function filtersAreClear(filters: Filters) {
+  return (
+    !filters.emirate &&
+    !filters.industry &&
+    !filters.status &&
+    !filters.product &&
+    !filters.search &&
+    filters.minScore === 0
+  );
 }
 
 function ScoreBadge({ score, className = "" }: { score: number; className?: string }) {

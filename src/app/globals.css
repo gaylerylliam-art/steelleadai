@@ -15,10 +15,9 @@ body {
   margin: 0;
   color: #172033;
   background:
-    radial-gradient(circle at top left, rgba(31, 122, 140, 0.16), transparent 28rem),
-    linear-gradient(135deg, rgba(82, 101, 122, 0.08) 0 25%, transparent 25% 50%, rgba(82, 101, 122, 0.08) 50% 75%, transparent 75%),
-    #f5f7fa;
-  background-size: auto, 28px 28px, auto;
+    radial-gradient(circle, rgba(31, 122, 140, 0.08) 1px, transparent 1px),
+    #f4f6f9;
+  background-size: 22px 22px, auto;
 }
 
 button,

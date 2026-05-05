@@ -12,6 +12,15 @@ const config: Config = {
       },
       boxShadow: {
         panel: "0 14px 40px rgba(23, 32, 51, 0.08)"
+      },
+      keyframes: {
+        slideIn: {
+          "0%": { transform: "translateX(100%)" },
+          "100%": { transform: "translateX(0)" }
+        }
+      },
+      animation: {
+        "slide-in": "slideIn 220ms ease-out"
       }
     }
   },
